@@ -1,22 +1,26 @@
-from datetime import datetime
-from typing import List, Dict
+# bot/utils/formatting.py
+from typing import Iterable, Mapping
 
-def fmt_date(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d")
-
-def bold(s: str) -> str:
-    return f"*{escape_md(s)}*"
-
-def code(s: str) -> str:
-    return f"`{escape_md(s)}`"
+# Набор спецсимволов MarkdownV2, которые нужно экранировать
+MDV2_SPECIALS = r'_\*\[\]\(\)~`>#+\-=|{}\.!'
 
 def escape_md(text: str) -> str:
-    specials = "_*[]()~`>#+-=|{}.!"  # Telegram MarkdownV2
+    """Экранирует текст под Telegram MarkdownV2."""
+    if not text:
+        return ""
+    specials = set(MDV2_SPECIALS)
     return "".join("\\" + c if c in specials else c for c in text)
 
-def render_results(items: List[Dict]) -> str:
-    if not items:
-        return "Ничего не найдено."
-    lines = ["*Найденные публикации:*"]
-    for it in items[:20]:
-        c
+def render_results(items: Iterable[Mapping]) -> str:
+    """Формирует компактный список результатов с кликабельными ссылками."""
+    lines = []
+    for it in items:
+        url = it.get("url") or it.get("link") or ""
+        title = escape_md(it.get("title") or it.get("text") or "Пост")
+        views = it.get("views") or it.get("count") or 0
+        platform = it.get("platform", "TG")
+        if url:
+            lines.append(f"• {escape_md(platform)}: [{title}]({escape_md(url)}) — {views}")
+        else:
+            lines.append(f"• {escape_md(platform)}: {title} — {views}")
+    return "\n".join(lines)
