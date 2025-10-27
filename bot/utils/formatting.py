@@ -1,10 +1,10 @@
 # bot/utils/formatting.py
-from __future__ import annotations
+# -*- coding: utf-8 -*-
 
+from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Sequence, Tuple, Union
 
 # -------- Markdown-v2 escaping -------------------------------------------------
-
 
 _MD_V2_NEED_ESCAPE = r"_*[]()~`>#+-=|{}.!"
 
@@ -27,7 +27,6 @@ def escape_md(text: Union[str, None]) -> str:
 
 # -------- Утилиты представления чисел ------------------------------------------
 
-
 def human_int(n: Union[int, float, None]) -> str:
     if n is None:
         return "0"
@@ -43,7 +42,6 @@ def human_int(n: Union[int, float, None]) -> str:
 
 
 # -------- Нормализация элементов выдачи ----------------------------------------
-
 
 Item = Dict[str, Any]
 Items = List[Item]
@@ -63,13 +61,11 @@ def ensure_safe_items(items: Iterable[Any]) -> Items:
         elif isinstance(x, str):
             safe.append({"text": x})
         else:
-            # игнорируем неизвестные типы, чтобы не ронять пайплайн
             continue
     return safe
 
 
 # -------- Телеграм-текст из элемента Telemetr ----------------------------------
-
 
 def _telemetr_body(it: Union[str, Item]) -> str:
     """
@@ -79,10 +75,8 @@ def _telemetr_body(it: Union[str, Item]) -> str:
     """
     if isinstance(it, str):
         return it.strip()
-
     if not isinstance(it, dict):
         return ""
-
     parts: List[str] = []
     for key in ("title", "text", "caption"):
         v = it.get(key)
@@ -90,19 +84,15 @@ def _telemetr_body(it: Union[str, Item]) -> str:
             v = str(v).strip()
             if v:
                 parts.append(v)
-
     return "\n".join(parts)
 
 
 def _telemetr_link(it: Item) -> str:
-    """
-    Пытаемся вытащить ссылку на пост из разных полей.
-    """
+    """Пытаемся вытащить ссылку на пост из разных полей."""
     for key in ("url", "link", "display_url"):
         v = it.get(key)
         if v:
             return str(v)
-    # Иногда Telemetr кладёт в media/display_url
     media = it.get("media")
     if isinstance(media, dict):
         v = media.get("display_url")
@@ -122,16 +112,9 @@ def _telemetr_channel_name(it: Item) -> str:
 
 # -------- Универсальный рендер результатов ------------------------------------
 
-
 def _smart_pick_args(*args, **kwargs) -> Tuple[str, Items, int, str]:
     """
-    Поддерживаем несколько «популярных» сигнатур вызова render_results:
-
-    1) render_results(items, title=None, max_items=10, footer=None)
-    2) render_results(title, items, max_items=10, footer=None)
-    3) render_results(items=..., title=..., max_items=..., footer=...)
-
-    Возвращаем кортеж: (title, items, max_items, footer)
+    Поддерживаем несколько «популярных» сигнатур вызова render_results.
     """
     title = kwargs.get("title") or ""
     max_items = int(kwargs.get("max_items") or 10)
@@ -141,12 +124,10 @@ def _smart_pick_args(*args, **kwargs) -> Tuple[str, Items, int, str]:
         items = ensure_safe_items(kwargs["items"])
         return str(title), items, max_items, str(footer)
 
-    # позиционные варианты
     if len(args) == 1 and isinstance(args[0], list):
         return str(title), ensure_safe_items(args[0]), max_items, str(footer)
 
     if len(args) >= 2:
-        # (title, items, ...)
         if isinstance(args[0], str) and isinstance(args[1], list):
             title = args[0]
             items = args[1]
@@ -156,7 +137,6 @@ def _smart_pick_args(*args, **kwargs) -> Tuple[str, Items, int, str]:
                 footer = args[3]
             return str(title), ensure_safe_items(items), max_items, str(footer)
 
-        # (items, title, ...)
         if isinstance(args[0], list) and isinstance(args[1], str):
             items = args[0]
             title = args[1]
@@ -166,7 +146,6 @@ def _smart_pick_args(*args, **kwargs) -> Tuple[str, Items, int, str]:
                 footer = args[3]
             return str(title), ensure_safe_items(items), max_items, str(footer)
 
-    # fallback — ничего не распознали
     items = ensure_safe_items([])
     return str(title), items, max_items, str(footer)
 
@@ -174,47 +153,66 @@ def _smart_pick_args(*args, **kwargs) -> Tuple[str, Items, int, str]:
 def render_results(*args, **kwargs) -> str:
     """
     Формирует один Markdown-v2 блок с превью результатов.
-    Терпима к «кривым» элементам и к неожиданным сигнатурам вызова.
-    Возвращает Готовый Текст.
     """
     title, items, max_items, footer = _smart_pick_args(*args, **kwargs)
-
     head = f"*{escape_md(title)}*\n" if title else ""
     if not items:
         return head + "_Ничего не найдено._"
 
     lines: List[str] = [head] if head else []
     shown = 0
-
     for it in items:
         if shown >= max_items:
             break
         body = _telemetr_body(it)
         if not body:
-            # даже если «тела» нет — попробуем показать ссылку/канал
             body = _telemetr_channel_name(it) or "Публикация"
-
-        # короткое превью
         preview = " ".join(body.split())
         if len(preview) > 180:
             preview = preview[:177] + "..."
-
         url = _telemetr_link(it)
         channel = _telemetr_channel_name(it)
-
-        left = f"• {escape_md(preview)}"
         right = f" — _{escape_md(channel)}_" if channel else ""
         if url:
-            # Кликабельный заголовок
             line = f"• [{escape_md(preview)}]({escape_md(url)}){right}"
         else:
-            line = left + right
-
+            line = f"• {escape_md(preview)}{right}"
         lines.append(line)
         shown += 1
-
     if footer:
         lines.append("")
         lines.append(escape_md(footer))
-
     return "\n".join(lines) or "_Ничего не найдено._"
+
+
+# --- Backward compatibility layer (для старого commands.py) -------------------
+
+# короткий алиас для escape_md
+esc = escape_md
+
+
+def fmt_summary(diag: str) -> str:
+    """Форматирует диагностическую строку поиска Telemetr."""
+    if not diag:
+        return "_Нет диагностики._"
+    lines = diag.strip().splitlines()
+    safe = "\n".join(escape_md(line) for line in lines)
+    return f"📊 *Диагностика:*\n{safe}"
+
+
+def fmt_result_card(stats: dict | None = None) -> str:
+    """Короткая карточка итога поиска (для сообщений бота)."""
+    if not stats:
+        return "_Нет данных._"
+    since = stats.get("since", "")
+    until = stats.get("until", "")
+    seeds = stats.get("seeds", 0)
+    total = stats.get("total", 0)
+    matched = stats.get("matched", 0)
+    return (
+        "📋 *Итоги поиска:*\n"
+        f"📅 Диапазон: *{escape_md(since)} — {escape_md(until)}*\n"
+        f"🧩 Фраз: *{seeds}*\n"
+        f"📊 Всего кандидатов: *{total}*\n"
+        f"🎯 Совпадений: *{matched}*"
+    )
