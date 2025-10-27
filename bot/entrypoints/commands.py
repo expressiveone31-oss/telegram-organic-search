@@ -38,7 +38,7 @@ async def handle_dates(m: types.Message, state: FSMContext):
     start_date, end_date = match.groups()
     await state.update_data(start_date=start_date, end_date=end_date)
     await m.answer(
-        f"Диапазон принят: <b>{esc(start_date)}</b> — <b>{esc(end_date)}</b>.\n"
+        f"Диапазон принят: <b>{escape_md(start_date)}</b> — <b>{escape_md(end_date)}</b>.\n"
         "Теперь пришли подводки или поисковые фразы (по одной на строке). "
         "Когда закончишь — просто отправь сообщение."
     )
@@ -63,7 +63,7 @@ async def handle_phrases(m: types.Message, state: FSMContext):
     # явный статус: старт
     status = await m.answer(
         "🔎 Запускаю поиск…\n"
-        f"📅 Диапазон: <b>{esc(since)}</b> — <b>{esc(until)}</b>\n"
+        f"📅 Диапазон: <b>{escape_md(since)}</b> — <b>{escape_md(until)}</b>\n"
         f"Фраз: {len(phrases)}"
     )
 
@@ -90,6 +90,6 @@ async def handle_phrases(m: types.Message, state: FSMContext):
             await m.answer(f"…и ещё {len(found) - 30} результатов. Уточни фразу или сузь диапазон, чтобы увидеть всё.")
     except Exception as e:
         # любой фэйл — понятная диагностика
-        await status.edit_text(f"⚠️ Ошибка поиска: <code>{esc(str(e))}</code>")
+        await status.edit_text(f"⚠️ Ошибка поиска: <code>{escape_md(str(e))}</code>")
     finally:
         await state.clear()
