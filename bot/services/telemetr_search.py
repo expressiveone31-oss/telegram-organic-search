@@ -221,4 +221,3 @@ async def search_telemetr(
     finally:
         if own_session and session:
             await session.close()
-
