@@ -20,15 +20,14 @@ async def main():
     bot = Bot(token=token, parse_mode=ParseMode.HTML)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # На всякий случай убираем webhook
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook удалён, переключаемся на long-polling")
-    except Exception as e:
-        logger.warning(f"Не удалось удалить webhook: {e}")
+    except Exception:
+        pass
 
     dp.include_router(commands_router)
     logger.info("Start polling…")
-
     await dp.start_polling(bot)
 
 
