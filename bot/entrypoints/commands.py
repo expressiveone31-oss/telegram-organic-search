@@ -8,7 +8,7 @@ import re
 from typing import List
 
 from bot.services.telemetr_search import search_telemetr
-from bot.utils.formatting import fmt_result_card, fmt_summary, esc
+from bot.utils.formatting import fmt_result_card, fmt_summary, escape_md
 
 commands_router = Router(name="commands")
 
