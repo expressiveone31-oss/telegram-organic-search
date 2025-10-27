@@ -19,7 +19,7 @@ def parse_range(s: str) -> tuple[date, date]:
         left, right = s.split("-", 1)
     return _parse_date(left), _parse_date(right)
 
-async def search_telemeter(
+async def search_telemetr(
     query: str,
     since: date,
     until: date,
