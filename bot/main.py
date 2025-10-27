@@ -4,6 +4,7 @@ import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.entrypoints.commands import commands_router
 
@@ -16,21 +17,18 @@ async def main():
     if not token:
         raise RuntimeError("BOT_TOKEN не задан")
 
-    # HTML вместо MarkdownV2 — меньше проблем с экранированием
     bot = Bot(token=token, parse_mode=ParseMode.HTML)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
-    # Сносим возможный старый вебхук (иначе long-polling может «молчать»)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Webhook удалён, переключаемся на long-polling")
     except Exception as e:
         logger.warning(f"Не удалось удалить webhook: {e}")
 
-    # Роутеры (обработчики команд)
     dp.include_router(commands_router)
-
     logger.info("Start polling…")
+
     await dp.start_polling(bot)
 
 
