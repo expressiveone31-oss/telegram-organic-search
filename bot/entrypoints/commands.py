@@ -1,13 +1,17 @@
-from aiogram import Router, types, F
+from aiogram import Router, types
 from aiogram.filters import CommandStart
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 
+import asyncio
 import re
+from typing import List
+
+from bot.services.telemetr_search import search_telemetr
+from bot.utils.formatting import fmt_result_card, fmt_summary, esc
 
 commands_router = Router(name="commands")
 
-# --- Определяем состояния ---
 class SearchStates(StatesGroup):
     waiting_for_dates = State()
     waiting_for_phrases = State()
@@ -24,7 +28,6 @@ async def start_cmd(m: types.Message, state: FSMContext):
     await state.set_state(SearchStates.waiting_for_dates)
 
 
-# --- Получаем диапазон дат ---
 @commands_router.message(SearchStates.waiting_for_dates)
 async def handle_dates(m: types.Message, state: FSMContext):
     text = m.text.strip()
@@ -32,35 +35,61 @@ async def handle_dates(m: types.Message, state: FSMContext):
     if not match:
         await m.answer("Формат неверный. Используй <code>YYYY-MM-DD — YYYY-MM-DD</code>.")
         return
-
     start_date, end_date = match.groups()
     await state.update_data(start_date=start_date, end_date=end_date)
     await m.answer(
-        f"Диапазон принят: <b>{start_date}</b> — <b>{end_date}</b>.\n"
+        f"Диапазон принят: <b>{esc(start_date)}</b> — <b>{esc(end_date)}</b>.\n"
         "Теперь пришли подводки или поисковые фразы (по одной на строке). "
         "Когда закончишь — просто отправь сообщение."
     )
     await state.set_state(SearchStates.waiting_for_phrases)
 
 
-# --- Получаем поисковые фразы ---
+def _extract_phrases(text: str) -> List[str]:
+    return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+
 @commands_router.message(SearchStates.waiting_for_phrases)
 async def handle_phrases(m: types.Message, state: FSMContext):
-    text = m.text.strip()
-    phrases = [line.strip() for line in text.split("\n") if line.strip()]
+    phrases = _extract_phrases(m.text)
     if not phrases:
         await m.answer("Не вижу ни одной фразы. Напиши хотя бы одну строку.")
         return
 
     data = await state.get_data()
-    start_date = data.get("start_date")
-    end_date = data.get("end_date")
+    since = data.get("start_date")
+    until = data.get("end_date")
 
-    await m.answer(
-        f"Запускаю поиск…\n"
-        f"📅 Диапазон: <b>{start_date}</b> — <b>{end_date}</b>\n"
+    # явный статус: старт
+    status = await m.answer(
+        "🔎 Запускаю поиск…\n"
+        f"📅 Диапазон: <b>{esc(since)}</b> — <b>{esc(until)}</b>\n"
         f"Фраз: {len(phrases)}"
     )
-    # --- здесь позже вставим вызов Telemetr API ---
-    await m.answer("✅ Поиск завершён (заглушка). Результаты появятся здесь.")
-    await state.clear()
+
+    try:
+        # сам поиск
+        found, meta = await search_telemetr(phrases, since, until)
+
+        # отчёт: сколько нашли
+        await status.edit_text(
+            fmt_summary(total=meta.get("total", 0), matched=len(found), since=since, until=until, phrases=phrases)
+        )
+
+        if not found:
+            await m.answer("❗️По заданным параметрам ничего не найдено.")
+            await state.clear()
+            return
+
+        # отдаём карточки (аккуратно — Telegram ограничивает частоту отправки)
+        for item in found[:30]:  # чтобы не заспамить — отдать до 30 карточек
+            await m.answer(fmt_result_card(item))
+            await asyncio.sleep(0.15)
+
+        if len(found) > 30:
+            await m.answer(f"…и ещё {len(found) - 30} результатов. Уточни фразу или сузь диапазон, чтобы увидеть всё.")
+    except Exception as e:
+        # любой фэйл — понятная диагностика
+        await status.edit_text(f"⚠️ Ошибка поиска: <code>{esc(str(e))}</code>")
+    finally:
+        await state.clear()
