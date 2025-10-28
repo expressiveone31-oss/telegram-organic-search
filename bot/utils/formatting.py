@@ -1,47 +1,77 @@
-
+# bot/utils/formatting.py
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
-from typing import Dict, Any, List
+
+from typing import Any, Dict, List
 
 def esc(s: str) -> str:
-    if not s:
-        return ''
+    """Простейший HTML-escape (мы используем ParseMode.HTML)."""
+    if not isinstance(s, str):
+        s = str(s)
     return (
-        s.replace('&', '&amp;')
-         .replace('<', '&lt;')
-         .replace('>', '&gt;')
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
     )
 
-def _cut(s: str, n: int) -> str:
-    if not s:
-        return ''
-    if len(s) <= n:
-        return s
-    return s[: max(0, n-1)] + '…'
+def _safe_str(v: Any) -> str:
+    return str(v) if v is not None else ""
 
-def _take_text(it: Dict[str, Any]) -> str:
-    for k in ('title', 'text', 'caption'):
-        v = it.get(k) or ''
-        if v.strip():
-            return v
-    return ''
+def _as_dict(it: Any) -> Dict[str, Any]:
+    if isinstance(it, dict):
+        return it
+    if isinstance(it, str):
+        return {"text": it}
+    return {}
 
-def fmt_summary(since: str, until: str, seeds: List[str], total: int) -> str:
+def _views(d: Dict[str, Any]) -> int:
+    v = d.get("views")
+    if v is None:
+        v = d.get("views_count")
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+def _link(d: Dict[str, Any]) -> str:
+    for k in ("display_url", "url", "link"):
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+def _body(d: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for k in ("title", "text", "caption"):
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+    return "\n".join(parts).strip() or "(без текста)"
+
+def fmt_summary(since: str, until: str, *, seeds: List[str], total: int) -> str:
     return (
         "Итоги поиска\n"
-        f"Диапазон: <b>{esc(since)} — {esc(until)}</b>\n"
-        f"Фраз: {len(seeds)}\n"
-        f"Всего кандидатов: {total}"
+        f"📅 Диапазон: <b>{esc(since)}</b> — <b>{esc(until)}</b>\n"
+        f"🔎 Фраз: <b>{len(seeds)}</b>\n"
+        f"📄 Всего кандидатов: <b>{total}</b>"
     )
 
-def fmt_result_card(it: Dict[str, Any]) -> str:
-    link = it.get('_link') or it.get('display_url') or it.get('url') or it.get('link') or ''
-    views = it.get('views') or it.get('views_count') or 0
-    seed = it.get('_seed') or ''
-    text = _cut(_take_text(it), 400)
-    title = it.get('channel', {}).get('title') or 'TELEGRAM • Channel'
-    return (
-        f"<b>{esc(title)}</b>\n"
-        f"{esc(text)}\n\n"
-        (f"<a href='{esc(link)}'>Открыть пост</a> • 👀 {views} • seed: <code>{esc(seed)}</code>" if link else f"👀 {views} • seed: <code>{esc(seed)}</code>")
-    )
+def fmt_result_card(item: Any) -> str:
+    d = _as_dict(item)
+    vx = _views(d)
+    link = _link(d)
+    seed = d.get("_seed") or ""
+    body = _body(d)
+
+    header = []
+    if seed:
+        header.append(f"🧩 По фразе: <b>{esc(seed)}</b>")
+    if vx:
+        header.append(f"👀 Просмотры: <b>{vx}</b>")
+    if link:
+        header.append(f"🔗 <a href=\"{esc(link)}\">Открыть пост</a>")
+
+    head = " · ".join(header) if header else "Пост"
+
+    return f"{head}\n\n{esc(body)}"
