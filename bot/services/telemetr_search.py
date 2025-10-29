@@ -18,22 +18,18 @@ import aiohttp
 TELEM_TOKEN = (os.getenv("TELEMETR_TOKEN") or "").strip()
 TELEM_BASE_URL = "https://api.telemetr.me"
 
-# Поведение запроса/матчинга
-TELEM_USE_QUOTES: bool = os.getenv("TELEMETR_USE_QUOTES", "1") == "1"
-# ⚠️ По умолчанию — строгий режим (как ты просила)
+# ВАЖНО: по умолчанию кавычки ВЫКЛ (можно включить env-переменной)
+TELEM_USE_QUOTES: bool = os.getenv("TELEMETR_USE_QUOTES", "0") == "1"
+
+# Строгий локальный матч (как вы просили)
 TELEM_REQUIRE_EXACT: bool = os.getenv("TELEMETR_REQUIRE_EXACT", "1") == "1"
-# Доверять ли совпадению, если у поста отсутствует текст (обычно лучше 0 в строгом режиме)
 TELEM_TRUST_QUERY: bool = os.getenv("TELEMETR_TRUST_QUERY", "0") == "1"
 
-# Фильтры и страницы
 TELEM_MIN_VIEWS: int = int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0)
-TELEM_PAGES: int = max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3))
+TELEM_PAGES: int = max(1, int(os.getenv("TELEMETR_PAGES", "50") or 50))
 
-# Включительная верхняя дата (добавить +1 день к date_to)
-TELEM_DATE_TO_INCLUSIVE: bool = os.getenv("TELEMETR_DATE_TO_INCLUSIVE", "0") == "1"
-
-# Расширенная отладка (в диагностику добавим sample_links)
-ORGANIC_DEBUG: bool = os.getenv("ORGANIC_DEBUG", "0") == "1"
+TELEM_DATE_TO_INCLUSIVE: bool = os.getenv("TELEMETR_DATE_TO_INCLUSIVE", "1") == "1"
+ORGANIC_DEBUG: bool = os.getenv("ORGANIC_DEBUG", "1") == "1"
 
 
 # =======================
@@ -41,14 +37,10 @@ ORGANIC_DEBUG: bool = os.getenv("ORGANIC_DEBUG", "0") == "1"
 # =======================
 
 def _normalize_seed(seed: str) -> str:
-    """
-    По желанию — оборачиваем фразу в кавычки для точного поиска на стороне Telemetr.
-    """
     s = (seed or "").strip()
     if TELEM_USE_QUOTES and s and not (s.startswith('"') and s.endswith('"')):
         return f"\"{s}\""
     return s
-
 
 def _plus_one_day(d: str) -> str:
     if not d:
@@ -59,29 +51,20 @@ def _plus_one_day(d: str) -> str:
     except Exception:
         return d
 
-
 def _as_dict(it: Any) -> Dict[str, Any]:
-    """
-    Telemetr может прислать строку вместо словаря — приводим к dict.
-    """
     if isinstance(it, dict):
         return it
     if isinstance(it, str):
         return {"text": it}
     return {}
 
-
 def _body_from_item(it: Dict[str, Any]) -> str:
-    """
-    Склеиваем поля в единый текст, чтобы матчить по ним.
-    """
     parts: List[str] = []
     for k in ("title", "text", "caption"):
         v = (it.get(k) or "").strip()
         if v:
             parts.append(v)
     return "\n".join(parts).strip()
-
 
 def _views_of(it: Dict[str, Any]) -> int:
     v = it.get("views") or it.get("views_count") or 0
@@ -90,36 +73,25 @@ def _views_of(it: Dict[str, Any]) -> int:
     except Exception:
         return 0
 
-
 def _link_of(it: Dict[str, Any]) -> str:
     return it.get("display_url") or it.get("url") or it.get("link") or ""
 
-
-# ---------- строгая проверка фразы без разрывов ----------
+# ---- строгая проверка фразы без разрывов ----
 
 def _norm_basic(s: str) -> str:
-    """Простая нормализация: NFKC, lower, схлопывание пробелов."""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s).lower()
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+_BOUNDARY_CLASS = r"[0-9A-Za-zА-Яа-яЁё_]"
 def _contains_exact_phrase_word_boundary(needle: str, haystack: str) -> bool:
-    """
-    ТОЛЬКО точное вхождение фразы (без вставок и синонимов):
-    - последовательность и пробелы внутри фразы должны совпадать (после _norm_basic),
-    - вокруг фразы может быть любой текст,
-    - применяем «границы» на основе не-алфанумных символов для кириллицы/латиницы.
-    """
     n = _norm_basic(needle)
     h = _norm_basic(haystack)
     if not n or not h:
         return False
-
-    # Для границ слова составим класс «алфанумерия + подчёркивание» сразу для двух алфавитов
-    boundary = r"[0-9A-Za-zА-Яа-яЁё_]"
-    pattern = rf"(?<!{boundary}){re.escape(n)}(?!{boundary})"
+    pattern = rf"(?<!{_BOUNDARY_CLASS}){re.escape(n)}(?!{_BOUNDARY_CLASS})"
     return re.search(pattern, h) is not None
 
 
@@ -135,10 +107,6 @@ async def _fetch_page(
     page: int,
     limit: int = 50,
 ) -> Tuple[List[Any], Dict[str, Any]]:
-    """
-    Забираем одну страницу результатов у Telemetr.
-    Возвращаем items (dict|str) и мета.
-    """
     if not TELEM_TOKEN:
         raise RuntimeError("TELEMETR_TOKEN is not set")
 
@@ -154,7 +122,7 @@ async def _fetch_page(
     headers = {"Authorization": f"Bearer {TELEM_TOKEN}"}
 
     url = f"{TELEM_BASE_URL}/channels/posts/search"
-    async with session.get(url, params=params, headers=headers, timeout=30) as resp:
+    async with session.get(url, params=params, headers=headers, timeout=45) as resp:
         data = await resp.json(content_type=None)
         if not isinstance(data, dict) or data.get("status") != "ok":
             return [], {"error": data}
@@ -178,15 +146,6 @@ async def search_telemetr(
     *,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
-    """
-    Основной пайплайн:
-      1) Нормализуем фразы (кавычки для Telemetr при необходимости).
-      2) Грузим посты по страницам.
-      3) Фильтруем по просмотрам.
-      4) Если включён строгий режим — принимаем ТОЛЬКО посты,
-         где фраза встречается как есть (без разрывов), вокруг — любой текст.
-      5) Возвращаем совпадения + диагностическую строку.
-    """
     seeds_raw: List[str] = [s.strip() for s in (seeds or []) if s and s.strip()]
     if not seeds_raw:
         return [], "Telemetr: нет фраз для поиска"
@@ -211,6 +170,9 @@ async def search_telemetr(
     matched: List[Dict[str, Any]] = []
     total_candidates = 0
 
+    # для расширенной диагностики, если не найдём ничего
+    debug_first_candidates: List[Dict[str, Any]] = []
+
     try:
         for idx, raw_seed in enumerate(seeds_raw):
             q = seeds_q[idx]
@@ -233,7 +195,6 @@ async def search_telemetr(
                 if len(items) < 50:
                     break
 
-            # нормализация и фильтр по просмотрам
             norm: List[Dict[str, Any]] = []
             for it in items_all:
                 d = _as_dict(it)
@@ -244,7 +205,10 @@ async def search_telemetr(
                     norm.append(d)
             filtered_by_views = len(norm)
 
-            # локальная строгая проверка
+            # Сохраним первые 10 кандидатов в debug-список (если потом не будет совпадений)
+            if ORGANIC_DEBUG and not debug_first_candidates:
+                debug_first_candidates = norm[:10]
+
             for d in norm:
                 body = _body_from_item(d)
                 ok = True
@@ -253,7 +217,7 @@ async def search_telemetr(
                     if body:
                         ok = _contains_exact_phrase_word_boundary(raw_seed, body)
                     else:
-                        ok = TELEM_TRUST_QUERY  # если текста нет, можно принять только если доверяем
+                        ok = TELEM_TRUST_QUERY
 
                 if ok:
                     d["_seed"] = raw_seed
@@ -269,16 +233,28 @@ async def search_telemetr(
 
         diag.append(f"total_candidates={total_candidates}, total_matched={len(matched)}")
 
-        # Расширенная диагностика — примеры ссылок
-        if ORGANIC_DEBUG and matched:
-            sample = []
-            for it in matched[:10]:
-                link = it.get("_link") or it.get("display_url") or it.get("url") or it.get("link") or ""
-                if link:
-                    seed_tag = it.get("_seed") or ""
-                    sample.append(f"- {link}  (seed: {seed_tag})")
-            if sample:
-                diag.append("sample_links:\n" + "\n".join(sample))
+        # ------- Расширенная диагностика -------
+        if ORGANIC_DEBUG:
+            if matched:
+                sample = []
+                for it in matched[:10]:
+                    link = it.get("_link") or it.get("display_url") or it.get("url") or it.get("link") or ""
+                    if link:
+                        seed_tag = it.get("_seed") or ""
+                        sample.append(f"- {link}  (seed: {seed_tag})")
+                if sample:
+                    diag.append("sample_links:\n" + "\n".join(sample))
+            else:
+                # Ничего не нашли: покажем ПОЧЕМУ на примере первых кандидатов
+                if debug_first_candidates:
+                    diag.append("no_strict_hits__first_candidates:")
+                    for i, it in enumerate(debug_first_candidates, 1):
+                        link = _link_of(it)
+                        body = _body_from_item(it)
+                        nbody = _norm_basic(body)
+                        diag.append(f"{i:02d}. {link or '(no link)'}")
+                        # обрезаем нормализованный текст, чтобы увидеть, почему не совпало
+                        diag.append(f"    body_norm: {nbody[:300]}{'…' if len(nbody) > 300 else ''}")
 
         return matched, "\n".join(diag)
 
