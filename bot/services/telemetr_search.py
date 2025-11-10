@@ -1,123 +1,30 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-import os
-import re
-import unicodedata
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-
+import logging
+import asyncio
 import aiohttp
+from typing import Tuple, List, Dict, Any
+from datetime import datetime, timedelta
 
-# =======================
-# ENV / настройки
-# =======================
+# Настройка логирования
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-TELEM_TOKEN = (os.getenv("TELEMETR_TOKEN") or "").strip()
-TELEM_BASE_URL = "https://api.telemetr.me"
-
-# ВАЖНО: по умолчанию кавычки ВЫКЛ (можно включить env-переменной)
-TELEM_USE_QUOTES: bool = os.getenv("TELEMETR_USE_QUOTES", "0") == "1"
-
-# Строгий локальный матч (как вы просили)
-TELEM_REQUIRE_EXACT: bool = os.getenv("TELEMETR_REQUIRE_EXACT", "1") == "1"
-TELEM_TRUST_QUERY: bool = os.getenv("TELEMETR_TRUST_QUERY", "0") == "1"
-
-TELEM_MIN_VIEWS: int = int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0)
-TELEM_PAGES: int = max(1, int(os.getenv("TELEMETR_PAGES", "50") or 50))
-
-TELEM_DATE_TO_INCLUSIVE: bool = os.getenv("TELEMETR_DATE_TO_INCLUSIVE", "1") == "1"
-ORGANIC_DEBUG: bool = os.getenv("ORGANIC_DEBUG", "1") == "1"
-
-# =======================
-# Вспомогательные
-# =======================
-
-def _normalize_seed(seed: str) -> str:
-    s = (seed or "").strip()
-    if TELEM_USE_QUOTES and s and not (s.startswith('"') and s.endswith('"')):
-        return f"\"{s}\""
-    return s
+# Глобальные настройки (задайте свои значения)
+TELEM_TOKEN = None  # Замените на ваш токен
+TELEM_DATE_TO_INCLUSIVE = True  # Флаг включения конечной даты
+TELEM_BASE_URL = "https://api.example.com"  # Замените на URL вашего API
 
 
-def _plus_one_day(d: str) -> str:
-    if not d:
-        return d
-    try:
-        # Обрабатываем случаи с временем (YYYY-MM-DDTHH:MM:SS)
-        date_part = d.split("T")[0]
-        dt = datetime.fromisoformat(date_part).date()
-        return (dt + timedelta(days=1)).isoformat()
-    except Exception:
-        return d  # Возвращаем исходную строку при ошибке
+def _plus_one_day(date_str: str) -> str:
+    """
+    Добавляет один день к дате в формате YYYY-MM-DD.
+    """
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    new_date = date_obj + timedelta(days=1)
+    return new_date.strftime("%Y-%m-%d")
 
-
-def _as_dict(it: Any) -> Dict[str, Any]:
-    if isinstance(it, dict):
-        return it
-    if isinstance(it, str):
-        return {"text": it}
-    return {}
-
-
-def _body_from_item(it: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    # Расширенный список полей для извлечения текста
-    for k in ("title", "text", "caption", "alt_text", "description", "content"):
-        v = (it.get(k) or "").strip()
-        if v:
-            parts.append(v)
-    return "\n".join(parts).strip()
-
-
-def _views_of(it: Dict[str, Any]) -> int:
-    v = it.get("views") or it.get("views_count") or 0
-    try:
-        return int(v)
-    except (ValueError, TypeError):
-        return 0
-
-
-def _link_of(it: Dict[str, Any]) -> str:
-    return it.get("display_url") or it.get("url") or it.get("link") or ""
-
-
-# ---- строгая проверка фразы без разрывов ----
-
-def _norm_basic(s: str) -> str:
-    if not s:
-        return ""
-    # Нормализация Unicode
-    s = unicodedata.normalize("NFKC", s)
-    # Замена всех видов тире на обычный дефис
-    s = re.sub(r"[\-\u2013\u2014]", "-", s)
-    # Замена всех видов кавычек на простые "
-    s = re.sub(r"[\"\u201C\u201D\u00AB\u00BB]", '"', s)
-    # Приведение к нижнему регистру
-    s = s.lower()
-    # Схлопывание пробелов
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-_BOUNDARY_CLASS = r"[0-9A-Za-zА-Яа-яЁё_]"
-
-
-def _contains_exact_phrase_word_boundary(needle: str, haystack: str) -> bool:
-    n = _norm_basic(needle)
-    h = _norm_basic(haystack)
-    if not n or not h:
-        return False
-
-    # Создаем шаблон с границами слов и поддержкой множественных пробелов
-    normalized_needle = re.sub(r'\s+', ' ', n)  # заменяем все пробелы на один
-    pattern = rf"\b{normalized_needle}\b"
-    return re.search(pattern, h) is not None
-
-
-# =======================
-# Telemetr API
-# =======================
 
 async def _fetch_page(
     session: aiohttp.ClientSession,
@@ -127,11 +34,28 @@ async def _fetch_page(
     page: int,
     limit: int = 50,
 ) -> Tuple[List[Any], Dict[str, Any]]:
+    """
+    Выполняет запрос к API для получения данных по поисковому запросу с фильтрацией по датам.
+    Включает полную обработку ошибок и логирование для диагностики.
+    """
+    logger.info("Запуск _fetch_page с параметрами: query=%s, since=%s, until=%s, page=%d, limit=%d",
+                query, since, until, page, limit)
+
+    # Шаг 1: Проверка наличия TELEM_TOKEN
     if not TELEM_TOKEN:
-        raise RuntimeError("TELEMETR_TOKEN is not set")
+        logger.critical("Критическая ошибка: TELEMETR_TOKEN не задан. Невозможно выполнить запрос.")
+        return [], {"error": "TELEMETR_TOKEN is not set"}
 
-    date_to = _plus_one_day(until) if TELEM_DATE_TO_INCLUSIVE else until
+    # Шаг 2: Расчёт конечной даты с учётом настройки inclusivity
+    try:
+        date_to = _plus_one_day(until) if TELEM_DATE_TO_INCLUSIVE else until
+        logger.debug("Рассчитанная дата окончания: %s (TELEM_DATE_TO_INCLUSIVE=%s)",
+                    date_to, TELEM_DATE_TO_INCLUSIVE)
+    except Exception as e:
+        logger.error("Ошибка при расчёте даты окончания: %s", str(e))
+        return [], {"error": f"Ошибка расчёта даты: {str(e)}"}
 
+    # Шаг 3: Формирование параметров запроса
     params = {
         "query": query,
         "date_from": since,
@@ -139,59 +63,108 @@ async def _fetch_page(
         "limit": str(limit),
         "page": str(page),
     }
+    logger.debug("Параметры запроса сформированы: %s", params)
+
     headers = {"Authorization": f"Bearer {TELEM_TOKEN}"}
+    logger.debug("Заголовки запроса: %s", headers)
 
-    url = f"{TELEM_BASE_URL}/channels/posts/search"
-    async with session.get(url, params=params, headers=headers, timeout=45) as resp:
-        try:
-            data = await resp.json(content_type=None)
-        except aiohttp.ContentTypeError:
-            # Если ответ не JSON, возвращаем ошибку
-            return [], {"error": f"Invalid JSON response: {await resp.text()}"}
+    # Шаг 4: Выполнение HTTP-запроса
+    try:
+        async with session.get(
+            url=f"{TELEM_BASE_URL}/channels/posts/search",
+            params=params,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=60)  # увеличенный таймаут
+        ) as resp:
+            logger.info("HTTP-запрос отправлен. Статус ответа: %d", resp.status)
 
-        if not isinstance(data, dict) or data.get("status") != "ok":
-            return [], {"error": data}
+            # Проверка HTTP-статуса
+            if resp.status != 200:
+                error_msg = f"HTTP ошибка: {resp.status} - {resp.reason}"
+                logger.error(error_msg)
+                return [], {"error": error_msg}
 
-        resp_obj = data.get("response") or {}
-        items = resp_obj.get("items") or []
-        return items, {
-            "count": resp_obj.get("count"),
-            "total_count": resp_obj.get("total_count"),
-        }
+            # Шаг 5: Парсинг JSON-ответа
+            try:
+                data = await resp.json(content_type=None)
+                logger.debug("JSON-ответ успешно распарсен")
+            except aiohttp.ContentTypeError as e:
+                text = await resp.text()
+                error_msg = f"Ошибка парсинга JSON: {text} ({e})"
+                logger.error(error_msg)
+                return [], {"error": error_msg}
+            except Exception as e:
+                error_msg = f"Неожиданная ошибка при парсинге JSON: {str(e)}"
+                logger.exception(error_msg)
+                return [], {"error": error_msg}
+
+            # Шаг 6: Валидация структуры ответа
+            if not isinstance(data, dict):
+                error_msg = f"Ответ API не является словарем: {type(data)}"
+                logger.error(error_msg)
+                return [], {"error": error_msg}
+
+            if data.get("status") != "ok":
+                error_msg = f"Неверный статус ответа API: {data.get('status')}"
+                logger.error(error_msg)
+                return [], {"error": error_msg}
+
+            # Шаг 7: Извлечение данных
+            resp_obj = data.get("response", {})
+            items = resp_obj.get("items", [])
+            meta = {
+                "count": resp_obj.get("count"),
+                "total_count": resp_obj.get("total_count"),
+                "page": page,
+                "limit": limit
+            }
+
+            logger.info("Данные успешно получены. Количество элементов: %d", len(items))
+            logger.debug("Метаданные: %s", meta)
+
+            return items, meta
+
+    except aiohttp.ClientError as e:
+        error_msg = f"Ошибка клиента aiohttp: {type(e).__name__}: {str(e)}"
+        logger.error(error_msg)
+        return [], {"error": error_msg}
+
+    except asyncio.TimeoutError:
+        error_msg = "Таймаут при ожидании ответа от API (60 секунд)"
+        logger.error(error_msg)
+        return [], {"error": error_msg}
+
+    except Exception as e:
+        error_msg = f"Непредвиденная ошибка: {type(e).__name__}: {str(e)}"
+        logger.exception("Полный стектрейс ошибки:")
+        return [], {"error": error_msg}
 
 
-# =======================
-# Публичный поиск
-# =======================
+# Пример функции для запуска запросов (можно доработать)
+async def fetch_all_pages(query: str, since: str, until: str, limit: int = 50):
+    """Собирает данные со всех страниц."""
+    async with aiohttp.ClientSession() as session:
+        all_items = []
+        page = 1
+        while True:
+            items, meta = await _fetch_page(session, query, since, until, page, limit)
+            if "error" in meta:
+                logger.error("Ошибка при получении страницы %d: %s", page, meta["error"])
+                break
 
-async def search_telemetr(
-    seeds: List[str],
-    since: str,
-    until: str,
-    *,
-    session: Optional[aiohttp.ClientSession] = None,
-) -> Tuple[List[Dict[str, Any]], str]:
-    # Исправление опечатки: было seeds_raw
-    seeds_raw: List[str] = [s.strip() for s in (seeds or []) if s and s.strip()]
-    if not seeds_raw:
-        return [], "Telemetr: нет фраз для поиска"
+            all_items.extend(items)
+            if len(items) < limit:  # Нет больше данных
+                break
+            page += 1
 
-    seeds_q: List[str] = [_normalize_seed(s) for s in seeds_raw]
+        return all_items
 
-    diag: List[str] = []
-    diag.append(
-        "Telemetr diag: "
-        f"strict={'on' if TELEM_REQUIRE_EXACT else 'off'}, "
-        f"quotes={'on' if TELEM_USE_QUOTES else 'off'}, "
-        f"trust_no_text={'on' if TELEM_TRUST_QUERY else 'off'}, "
-        f"min_views={TELEM_MIN_VIEWS}, pages={TELEM_PAGES}, "
-        f"date_to_inclusive={'on' if TELEM_DATE_TO_INCLUSIVE else 'off'}"
-    )
 
-    own_session = False
-    if session is None:
-        own_session = True
-        session = aiohttp.ClientSession()
-
-    matched: List[Dict[str, Any]] = []
-    total_candidates = 0
+if __name__ == "__main__":
+    # Пример запуска (замените параметры на свои)
+    asyncio.run(fetch_all_pages(
+        query="example query",
+        since="2023-01-01",
+        until="2023-12-31",
+        limit=50
+    ))
