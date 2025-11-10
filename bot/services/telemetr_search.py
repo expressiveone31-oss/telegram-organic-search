@@ -39,6 +39,7 @@ def _normalize_seed(seed: str) -> str:
         return f"\"{s}\""
     return s
 
+
 def _plus_one_day(d: str) -> str:
     if not d:
         return d
@@ -50,12 +51,14 @@ def _plus_one_day(d: str) -> str:
     except Exception:
         return d  # Возвращаем исходную строку при ошибке
 
+
 def _as_dict(it: Any) -> Dict[str, Any]:
     if isinstance(it, dict):
         return it
     if isinstance(it, str):
         return {"text": it}
     return {}
+
 
 def _body_from_item(it: Dict[str, Any]) -> str:
     parts: List[str] = []
@@ -66,6 +69,7 @@ def _body_from_item(it: Dict[str, Any]) -> str:
             parts.append(v)
     return "\n".join(parts).strip()
 
+
 def _views_of(it: Dict[str, Any]) -> int:
     v = it.get("views") or it.get("views_count") or 0
     try:
@@ -73,8 +77,10 @@ def _views_of(it: Dict[str, Any]) -> int:
     except (ValueError, TypeError):
         return 0
 
+
 def _link_of(it: Dict[str, Any]) -> str:
     return it.get("display_url") or it.get("url") or it.get("link") or ""
+
 
 # ---- строгая проверка фразы без разрывов ----
 
@@ -93,18 +99,21 @@ def _norm_basic(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 _BOUNDARY_CLASS = r"[0-9A-Za-zА-Яа-яЁё_]"
+
 
 def _contains_exact_phrase_word_boundary(needle: str, haystack: str) -> bool:
     n = _norm_basic(needle)
     h = _norm_basic(haystack)
     if not n or not h:
         return False
-    
+
     # Создаем шаблон с границами слов и поддержкой множественных пробелов
-normalized_needle = re.sub(r'\s+', ' ', n)  # заменяем все пробелы на один
-pattern = rf"\b{normalized_needle}\b"
-return re.search(pattern, h) is not None
+    normalized_needle = re.sub(r'\s+', ' ', n)  # заменяем все пробелы на один
+    pattern = rf"\b{normalized_needle}\b"
+    return re.search(pattern, h) is not None
+
 
 # =======================
 # Telemetr API
@@ -150,6 +159,7 @@ async def _fetch_page(
             "total_count": resp_obj.get("total_count"),
         }
 
+
 # =======================
 # Публичный поиск
 # =======================
@@ -185,5 +195,3 @@ async def search_telemetr(
 
     matched: List[Dict[str, Any]] = []
     total_candidates = 0
-
-    # Для расширенной диагностики, если не найдём
