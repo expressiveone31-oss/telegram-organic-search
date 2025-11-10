@@ -102,7 +102,8 @@ def _contains_exact_phrase_word_boundary(needle: str, haystack: str) -> bool:
         return False
     
     # Создаем шаблон с границами слов и поддержкой множественных пробелов
-    pattern = rf"\b{re.sub(r'\s+', r'\\s+', n)}\b"
+normalized_needle = re.sub(r'\s+', ' ', n)  # заменяем все пробелы на один
+pattern = rf"\b{normalized_needle}\b"
     return re.search(pattern, h) is not None
 
 # =======================
