@@ -1,170 +1,124 @@
+from typing import List, Dict, Optional
+import requests
 import logging
-import asyncio
-import aiohttp
-from typing import Tuple, List, Dict, Any
-from datetime import datetime, timedelta
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Глобальные настройки (задайте свои значения)
-TELEM_TOKEN = None  # Замените на ваш токен
-TELEM_DATE_TO_INCLUSIVE = True  # Флаг включения конечной даты
-TELEM_BASE_URL = "https://api.example.com"  # Замените на URL вашего API
+# Пример токена и URL API — замените на актуальные значения
+TELEM_TOKEN = "YOUR_TELEM_TOKEN_HERE"  # замените на реальный токен
+TELEM_API_URL = "https://api.example.com/telemetry"  # замените на реальный URL
 
 
-def _plus_one_day(date_str: str) -> str:
-    """
-    Добавляет один день к дате в формате YYYY-MM-DD.
-    """
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-    new_date = date_obj + timedelta(days=1)
-    return new_date.strftime("%Y-%m-%d")
-
-
-async def _fetch_page(
-    session: aiohttp.ClientSession,
+def search_telemetr(
     query: str,
-    since: str,
-    until: str,
-    page: int,
+    since: str,  # формат: "YYYY-MM-DD"
+    until: str,  # формат: "YYYY-MM-DD"
     limit: int = 50,
-) -> Tuple[List[Any], Dict[str, Any]]:
+    offset: int = 0
+) -> List[Dict]:
     """
-    Выполняет запрос к API для получения данных по поисковому запросу с фильтрацией по датам.
-    Включает полную обработку ошибок и логирование для диагностики.
+    Функция поиска телеметрии по запросу.
+    Выполняет HTTP-запрос к API телеметрии и возвращает результаты.
+
+    :param query: поисковый запрос (например, "error", "response_time")
+    :param since: начальная дата (включительно), формат "YYYY-MM-DD"
+    :param until: конечная дата (включительно), формат "YYYY-MM-DD"
+    :param limit: лимит результатов (максимум 1000)
+    :param offset: смещение для пагинации
+    :return: список словарей с результатами поиска
     """
-    logger.info("Запуск _fetch_page с параметрами: query=%s, since=%s, until=%s, page=%d, limit=%d",
-                query, since, until, page, limit)
-
-    # Шаг 1: Проверка наличия TELEM_TOKEN
-    if not TELEM_TOKEN:
-        logger.critical("Критическая ошибка: TELEMETR_TOKEN не задан. Невозможно выполнить запрос.")
-        return [], {"error": "TELEMETR_TOKEN is not set"}
-
-    # Шаг 2: Расчёт конечной даты с учётом настройки inclusivity
     try:
-        date_to = _plus_one_day(until) if TELEM_DATE_TO_INCLUSIVE else until
-        logger.debug("Рассчитанная дата окончания: %s (TELEM_DATE_TO_INCLUSIVE=%s)",
-                    date_to, TELEM_DATE_TO_INCLUSIVE)
-    except Exception as e:
-        logger.error("Ошибка при расчёте даты окончания: %s", str(e))
-        return [], {"error": f"Ошибка расчёта даты: {str(e)}"}
+        headers = {
+            "Authorization": f"Bearer {TELEM_TOKEN}",
+            "Content-Type": "application/json"
+        }
 
-    # Шаг 3: Формирование параметров запроса
-    params = {
-        "query": query,
-        "date_from": since,
-        "date_to": date_to,
-        "limit": str(limit),
-        "page": str(page),
-    }
-    logger.debug("Параметры запроса сформированы: %s", params)
+        params = {
+            "q": query,
+            "since": since,
+            "until": until,
+            "limit": limit,
+            "offset": offset
+        }
 
-    headers = {"Authorization": f"Bearer {TELEM_TOKEN}"}
-    logger.debug("Заголовки запроса: %s", headers)
-
-    # Шаг 4: Выполнение HTTP-запроса
-    try:
-        async with session.get(
-            url=f"{TELEM_BASE_URL}/channels/posts/search",
-            params=params,
+        response = requests.get(
+            TELEM_API_URL,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=60)  # увеличенный таймаут
-        ) as resp:
-            logger.info("HTTP-запрос отправлен. Статус ответа: %d", resp.status)
+            params=params,
+            timeout=30
+        )
 
-            # Проверка HTTP-статуса
-            if resp.status != 200:
-                error_msg = f"HTTP ошибка: {resp.status} - {resp.reason}"
-                logger.error(error_msg)
-                return [], {"error": error_msg}
+        if response.status_code == 200:
+            logger.info("Телеметрия найдена: %s результатов", len(response.json()))
+            return response.json()
+        else:
+            logger.error(
+                "Ошибка при поиске телеметрии: %s, %s",
+                response.status_code,
+                response.text
+            )
+            return []
 
-            # Шаг 5: Парсинг JSON-ответа
-            try:
-                data = await resp.json(content_type=None)
-                logger.debug("JSON-ответ успешно распарсен")
-            except aiohttp.ContentTypeError as e:
-                text = await resp.text()
-                error_msg = f"Ошибка парсинга JSON: {text} ({e})"
-                logger.error(error_msg)
-                return [], {"error": error_msg}
-            except Exception as e:
-                error_msg = f"Неожиданная ошибка при парсинге JSON: {str(e)}"
-                logger.exception(error_msg)
-                return [], {"error": error_msg}
+    except requests.exceptions.RequestException as e:
+        logger.error("Ошибка сети при поиске телеметрии: %s", str(e))
+        return []
+    except Exception as e:
+        logger.error("Неожиданная ошибка: %s", str(e))
+        return []
 
-            # Шаг 6: Валидация структуры ответа
-            if not isinstance(data, dict):
-                error_msg = f"Ответ API не является словарем: {type(data)}"
-                logger.error(error_msg)
-                return [], {"error": error_msg}
 
-            if data.get("status") != "ok":
-                error_msg = f"Неверный статус ответа API: {data.get('status')}"
-                logger.error(error_msg)
-                return [], {"error": error_msg}
+def get_telemetry_by_id(telemetry_id: str) -> Optional[Dict]:
+    """
+    Получить детальную информацию о телеметрии по ID.
 
-            # Шаг 7: Извлечение данных
-            resp_obj = data.get("response", {})
-            items = resp_obj.get("items", [])
-            meta = {
-                "count": resp_obj.get("count"),
-                "total_count": resp_obj.get("total_count"),
-                "page": page,
-                "limit": limit
-            }
+    :param telemetry_id: ID записи телеметрии
+    :return: словарь с данными или None, если не найдено
+    """
+    try:
+        headers = {"Authorization": f"Bearer {TELEM_TOKEN}"}
+        response = requests.get(
+            f"{TELEM_API_URL}/{telemetry_id}",
+            headers=headers,
+            timeout=30
+        )
 
-            logger.info("Данные успешно получены. Количество элементов: %d", len(items))
-            logger.debug("Метаданные: %s", meta)
-
-            return items, meta
-
-    except aiohttp.ClientError as e:
-        error_msg = f"Ошибка клиента aiohttp: {type(e).__name__}: {str(e)}"
-        logger.error(error_msg)
-        return [], {"error": error_msg}
-
-    except asyncio.TimeoutError:
-        error_msg = "Таймаут при ожидании ответа от API (60 секунд)"
-        logger.error(error_msg)
-        return [], {"error": error_msg}
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.error("Ошибка получения телеметрии: %s", response.text)
+            return None
 
     except Exception as e:
-        error_msg = f"Непредвиденная ошибка: {type(e).__name__}: {str(e)}"
-        logger.exception("Полный стектрейс ошибки:")
-        return [], {"error": error_msg}
+        logger.error("Ошибка при получении телеметрии: %s", str(e))
+        return None
 
 
-# Пример функции для запуска запросов (можно доработать)
-async def fetch_all_pages(query: str, since: str, until: str, limit: int = 50):
-    """Собирает данные со всех страниц."""
-    async with aiohttp.ClientSession() as session:
-        all_items = []
-        page = 1
-        while True:
-            items, meta = await _fetch_page(session, query, since, until, page, limit)
-            if "error" in meta:
-                logger.error("Ошибка при получении страницы %d: %s", page, meta["error"])
-                break
+def filter_telemetry_by_status(telemetry_list: List[Dict], status: str) -> List[Dict]:
+    """
+    Фильтрация телеметрии по статусу.
 
-            all_items.extend(items)
-            if len(items) < limit:  # Нет больше данных
-                break
-            page += 1
-
-        return all_items
+    :param telemetry_list: список записей телеметрии
+    :param status: статус для фильтрации (например, "error", "warning")
+    :return: отфильтрованный список
+    """
+    return [item for item in telemetry_list if item.get("status") == status]
 
 
+# Пример использования (можно удалить или закомментировать)
 if __name__ == "__main__":
-    # Пример запуска (замените параметры на свои)
-    asyncio.run(fetch_all_pages(
-        query="example query",
-        since="2023-01-01",
-        until="2023-12-31",
-        limit=50
-    ))
+    # Пример поиска ошибок за последнюю неделю
+    results = search_telemetr(
+        query="error",
+        since="2023-10-01",
+        until="2023-10-07",
+        limit=10
+    )
+    print("Найденные ошибки:", results)
+
+    # Пример получения детальной информации
+    if results:
+        first_item = results[0]
+        detailed = get_telemetry_by_id(first_item["id"])
+        print("Детальная информация:", detailed)
