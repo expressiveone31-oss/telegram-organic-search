@@ -104,7 +104,7 @@ def _contains_exact_phrase_word_boundary(needle: str, haystack: str) -> bool:
     # Создаем шаблон с границами слов и поддержкой множественных пробелов
 normalized_needle = re.sub(r'\s+', ' ', n)  # заменяем все пробелы на один
 pattern = rf"\b{normalized_needle}\b"
-    return re.search(pattern, h) is not None
+return re.search(pattern, h) is not None
 
 # =======================
 # Telemetr API
