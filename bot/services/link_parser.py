@@ -20,10 +20,27 @@ VK_SHORT_URL_RE = re.compile(r"https?://vk\.(?:com|ru)/[^?#]+\?w=wall(-?\d+)_(\d
 
 # Стоп-слова — не идут в поисковые фразы
 _STOPWORDS = {
-    "и", "в", "на", "с", "по", "из", "за", "к", "у", "о", "а", "но", "или",
-    "что", "как", "это", "все", "там", "тут", "уже", "ещё", "еще", "только",
-    "мы", "вы", "они", "он", "она", "я", "бы", "не", "да", "нет", "то", "же",
-    "ваши", "наши", "свои", "такой", "такая", "такое", "такие",
+    # предлоги
+    "и", "в", "на", "с", "по", "из", "за", "к", "у", "о", "об", "при", "под",
+    "над", "без", "для", "про", "через", "перед", "между", "среди",
+    # союзы
+    "а", "но", "или", "что", "как", "если", "когда", "чтобы", "потому",
+    "также", "тоже", "либо", "хотя", "пока",
+    # местоимения
+    "это", "все", "там", "тут", "мы", "вы", "они", "он", "она", "я", "то",
+    "ваши", "наши", "свои", "такой", "такая", "такое", "такие", "этот",
+    "эта", "эти", "того", "этого", "свой", "сами", "сама", "само",
+    # частицы/наречия
+    "уже", "ещё", "еще", "только", "бы", "не", "да", "нет", "же", "вот",
+    "здесь", "там", "тут", "очень", "quite", "very",
+    # глаголы-связки и частые глаголы
+    "стала", "стало", "стали", "была", "было", "были", "есть", "будет",
+    "бывает", "можно", "нужно", "надо", "хотел", "хочет", "могут",
+    # вопросительные
+    "что", "где", "кто", "как", "зачем", "почему", "куда", "откуда",
+    # обращения / типичный мусор посевов
+    "ваши", "ответы", "смешные", "предположения", "подписчики", "друзья",
+    "читатели", "только", "просто", "очень", "сеть", "сети",
 }
 
 
@@ -124,48 +141,87 @@ async def parse_link(url: str) -> Optional[ParsedPost]:
     return None
 
 
+def _clean_text(text: str) -> str:
+    """Убирает ссылки, спецсимволы, эмодзи, лишние пробелы."""
+    text = re.sub(r"https?://\S+", "", text)
+    # убираем эмодзи и спецсимволы (всё что не буква/цифр/пробел/дефис)
+    text = re.sub(r"[^\w\s\-]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _words_from_text(text: str) -> list[str]:
+    """Слова 4+ букв, не стоп-слова."""
+    return [
+        w.lower()
+        for w in re.findall(r"[а-яёА-ЯЁa-zA-Z]{4,}", _clean_text(text))
+        if w.lower() not in _STOPWORDS
+    ]
+
+
 def extract_seeds_from_posts(texts: list[str]) -> list[str]:
     """
     Извлекает поисковые фразы из текстов посевов.
 
-    Стратегия: берём биграммы и триграммы из слов длиной 4+,
-    не являющихся стоп-словами. Это даёт короткие именные словосочетания
-    которые встречаются в органических репостах даже при перефразировании.
-    Плюс добавляем наиболее длинные одиночные слова как fallback.
+    Стратегия:
+    1. Из каждого текста берём окна 3-4 значимых слова (триграммы и квадраграммы)
+    2. Приоритет — фразы чьи слова встречаются в НЕСКОЛЬКИХ посевах
+       (это и есть общая тема, а не уникальная формулировка одного поста)
+    3. Отсекаем фразы где есть слово короче 4 букв — значит туда попало
+       служебное слово
     """
-    # Собираем все слова из всех текстов
-    all_words: list[str] = []
-    for text in texts:
-        clean = re.sub(r"https?://\S+", "", text)
-        clean = re.sub(r"[#@«»„""\"\(\)\[\]️🔮😁]+", " ", clean)
-        words = re.findall(r"[а-яёА-ЯЁa-zA-Z]{4,}", clean)
-        all_words.extend(w.lower() for w in words if w.lower() not in _STOPWORDS)
+    if not texts:
+        return []
+
+    # Слова из каждого текста
+    per_text: list[list[str]] = [_words_from_text(t) for t in texts]
+
+    # Частота слов по всем текстам (в скольких текстах встречается)
+    from collections import Counter
+    word_doc_freq: Counter = Counter()
+    for words in per_text:
+        for w in set(words):
+            word_doc_freq[w] += 1
 
     seeds: list[str] = []
 
-    # Биграммы (пары слов) — из каждого текста отдельно
-    for text in texts:
-        clean = re.sub(r"https?://\S+", "", text)
-        clean = re.sub(r"[#@«»„""\"\(\)\[\]️🔮😁]+", " ", clean)
-        words = [
-            w.lower() for w in re.findall(r"[а-яёА-ЯЁa-zA-Z]{4,}", clean)
-            if w.lower() not in _STOPWORDS
-        ]
-        for i in range(len(words) - 1):
-            bigram = f"{words[i]} {words[i+1]}"
-            seeds.append(bigram)
-        # Триграммы
-        for i in range(len(words) - 2):
-            trigram = f"{words[i]} {words[i+1]} {words[i+2]}"
-            seeds.append(trigram)
+    for words in per_text:
+        # Только триграммы — квадраграммы слишком часто захватывают случайные слова
+        for size in (3,):
+            for i in range(len(words) - size + 1):
+                phrase_words = words[i:i + size]
+                # Все слова должны быть 4+ букв (стоп-слова уже отфильтрованы,
+                # но могут проскочить короткие нейтральные)
+                if any(len(w) < 4 for w in phrase_words):
+                    continue
+                phrase = " ".join(phrase_words)
+                seeds.append((phrase, phrase_words))
 
-    # Дедупликация с сохранением порядка
-    seen: set[str] = set()
-    unique: list[str] = []
-    for s in seeds:
-        if s not in seen:
-            seen.add(s)
-            unique.append(s)
+    if not seeds:
+        return []
 
-    # Берём максимум 8 фраз — лучше меньше да точнее
-    return unique[:8]
+    # Сортируем: сначала фразы где больше слов встречается в нескольких текстах
+    def _score(item: tuple) -> float:
+        phrase, words = item
+        if len(texts) == 1:
+            return float(len(words))
+        cross_text_score = sum(word_doc_freq[w] for w in words)
+        return float(cross_text_score * len(words))
+
+    seeds.sort(key=_score, reverse=True)
+
+    # Дедупликация: не берём фразу если она подстрока уже выбранной
+    chosen: list[str] = []
+    chosen_set: set[str] = set()
+    for phrase, _ in seeds:
+        if phrase in chosen_set:
+            continue
+        # не добавляем если эта фраза уже содержится в более длинной выбранной
+        already_covered = any(phrase in ch for ch in chosen)
+        if not already_covered:
+            chosen.append(phrase)
+            chosen_set.add(phrase)
+        if len(chosen) >= 6:
+            break
+
+    return chosen
