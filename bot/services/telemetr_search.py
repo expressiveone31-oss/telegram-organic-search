@@ -16,16 +16,25 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.telemetr.me"
 
 
+MAX_PAGES_HARD_LIMIT = 5  # абсолютный потолок, даже если в env стоит больше
+
+
 def _cfg() -> Dict[str, Any]:
     """Читаем конфиг при каждом вызове — Railway может подтянуть переменные позже."""
-    return {
+    pages = min(
+        MAX_PAGES_HARD_LIMIT,
+        max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3))
+    )
+    cfg = {
         "token":         os.getenv("TELEMETR_TOKEN", "").strip(),
         "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "0") == "1",
         "require_exact": os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1",
-        "trust_query":   os.getenv("TELEMETR_TRUST_QUERY", "1") == "1",
         "min_views":     int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0),
-        "pages":         max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3)),
+        "pages":         pages,
     }
+    logger.info("Telemetr cfg: pages=%d min_views=%d use_quotes=%s require_exact=%s",
+                cfg["pages"], cfg["min_views"], cfg["use_quotes"], cfg["require_exact"])
+    return cfg
 
 
 def _ts_to_date(ts: int) -> str:
