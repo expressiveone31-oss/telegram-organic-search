@@ -4,44 +4,39 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-import aiohttp
+import httpx
 
-TELEMETR_TOKEN         = os.getenv("TELEMETR_TOKEN", "").strip()
-TELEMETR_USE_QUOTES    = os.getenv("TELEMETR_USE_QUOTES", "1") == "1"
-TELEMETR_REQUIRE_EXACT = os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1"
-TELEMETR_TRUST_QUERY   = os.getenv("TELEMETR_TRUST_QUERY", "1") == "1"
-TELEMETR_MIN_VIEWS     = int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0)
-TELEMETR_PAGES         = max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3))
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.telemetr.me"
 
 
-def _normalize_seed(seed: str) -> str:
-    s = (seed or "").strip()
-    if TELEMETR_USE_QUOTES and s and not (s.startswith('"') and s.endswith('"')):
+def _cfg() -> Dict[str, Any]:
+    """Читаем конфиг при каждом вызове — Railway может подтянуть переменные позже."""
+    return {
+        "token":         os.getenv("TELEMETR_TOKEN", "").strip(),
+        "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "1") == "1",
+        "require_exact": os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1",
+        "trust_query":   os.getenv("TELEMETR_TRUST_QUERY", "1") == "1",
+        "min_views":     int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0),
+        "pages":         max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3)),
+    }
+
+
+def _ts_to_date(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _normalize_seed(seed: str, use_quotes: bool) -> str:
+    s = seed.strip()
+    if use_quotes and s and not (s.startswith('"') and s.endswith('"')):
         return f'"{s}"'
     return s
-
-
-def _as_dict(it: Any) -> Dict[str, Any]:
-    if isinstance(it, dict):
-        return it
-    if isinstance(it, str):
-        return {"text": it}
-    return {}
-
-
-def _body_from_item(it: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    for k in ("title", "text", "caption"):
-        v = (it.get(k) or "").strip()
-        if v:
-            parts.append(v)
-    return "\n".join(parts).strip()
 
 
 def _views_of(it: Dict[str, Any]) -> int:
@@ -56,84 +51,95 @@ def _link_of(it: Dict[str, Any]) -> str:
     return it.get("display_url") or it.get("url") or it.get("link") or ""
 
 
-def _ts_to_date(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+def _body_of(it: Dict[str, Any]) -> str:
+    return " ".join(
+        (it.get(k) or "").strip()
+        for k in ("title", "text", "caption")
+    ).strip()
 
 
 async def _fetch_page(
-    session: aiohttp.ClientSession,
+    client: httpx.AsyncClient,
+    token: str,
     query: str,
     since: str,
     until: str,
     page: int,
-    limit: int = 50,
-) -> Tuple[List[Any], Dict[str, Any]]:
-    if not TELEMETR_TOKEN:
-        raise RuntimeError("TELEMETR_TOKEN is not set")
+) -> List[Any]:
     params = {
         "query": query,
         "date_from": since,
         "date_to": until,
-        "limit": str(limit),
+        "limit": "50",
         "page": str(page),
     }
-    headers = {"Authorization": f"Bearer {TELEMETR_TOKEN}"}
-    url = f"{BASE_URL}/channels/posts/search"
-    async with session.get(url, params=params, headers=headers, timeout=30) as resp:
-        data = await resp.json(content_type=None)
-        if not isinstance(data, dict) or data.get("status") != "ok":
-            return [], {"error": data}
-        resp_obj = data.get("response") or {}
-        items = resp_obj.get("items") or []
-        return items, {"count": resp_obj.get("count")}
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = await client.get(
+            f"{BASE_URL}/channels/posts/search",
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except httpx.HTTPStatusError as e:
+        logger.error("Telemetr HTTP %s for query=%r: %s", e.response.status_code, query, e.response.text[:200])
+        return []
+    except Exception as e:
+        logger.error("Telemetr request failed for query=%r: %s", query, e)
+        return []
+
+    if not isinstance(data, dict) or data.get("status") != "ok":
+        logger.error("Telemetr bad response for query=%r: %s", query, str(data)[:300])
+        return []
+
+    return (data.get("response") or {}).get("items") or []
 
 
 async def search_telemetr(
     seeds: List[str],
     since_ts: int,
     until_ts: int,
-    session: Optional[aiohttp.ClientSession] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
+    cfg = _cfg()
+    if not cfg["token"]:
+        raise RuntimeError("TELEMETR_TOKEN is not set")
+
     since = _ts_to_date(since_ts)
     until = _ts_to_date(until_ts)
-
-    seeds_raw = [s.strip() for s in (seeds or []) if s and s.strip()]
-    if not seeds_raw:
+    seeds = [s.strip() for s in seeds if s.strip()]
+    if not seeds:
         return [], "нет фраз для поиска"
 
-    seeds_q = [_normalize_seed(s) for s in seeds_raw]
-    own = session is None
-    if own:
-        session = aiohttp.ClientSession()
-
     matched: List[Dict[str, Any]] = []
-    try:
-        for idx, raw_seed in enumerate(seeds_raw):
-            q = seeds_q[idx]
+
+    async with httpx.AsyncClient() as client:
+        for raw_seed in seeds:
+            q = _normalize_seed(raw_seed, cfg["use_quotes"])
             items_all: List[Any] = []
-            for page in range(1, TELEMETR_PAGES + 1):
-                items, _ = await _fetch_page(session, q, since, until, page)
+
+            for page in range(1, cfg["pages"] + 1):
+                items = await _fetch_page(client, cfg["token"], q, since, until, page)
                 items_all.extend(items)
                 if len(items) < 50:
                     break
 
-            for it in items_all:
-                d = _as_dict(it)
-                if not d:
-                    continue
-                if _views_of(d) < TELEMETR_MIN_VIEWS:
-                    continue
-                ok = True
-                if TELEMETR_REQUIRE_EXACT:
-                    body = _body_from_item(d)
-                    ok = (raw_seed in body) if body else TELEMETR_TRUST_QUERY
-                if ok:
-                    d["_seed"] = raw_seed
-                    d["_link"] = _link_of(d)
-                    matched.append(d)
+            logger.info("Telemetr seed=%r fetched=%d", raw_seed, len(items_all))
 
-        diag = f"seeds={len(seeds_raw)}, matched={len(matched)}, range={since}–{until}"
-        return matched, diag
-    finally:
-        if own and session:
-            await session.close()
+            for it in items_all:
+                if not isinstance(it, dict):
+                    continue
+                if _views_of(it) < cfg["min_views"]:
+                    continue
+                if cfg["require_exact"]:
+                    body = _body_of(it)
+                    if body and raw_seed not in body:
+                        continue
+                it["_seed"] = raw_seed
+                it["_link"] = _link_of(it)
+                matched.append(it)
+
+    diag = f"seeds={len(seeds)}, matched={len(matched)}, range={since}–{until}"
+    logger.info("Telemetr done: %s", diag)
+    return matched, diag
