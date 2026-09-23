@@ -20,7 +20,7 @@ def _cfg() -> Dict[str, Any]:
     """Читаем конфиг при каждом вызове — Railway может подтянуть переменные позже."""
     return {
         "token":         os.getenv("TELEMETR_TOKEN", "").strip(),
-        "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "1") == "1",
+        "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "0") == "1",
         "require_exact": os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1",
         "trust_query":   os.getenv("TELEMETR_TRUST_QUERY", "1") == "1",
         "min_views":     int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0),

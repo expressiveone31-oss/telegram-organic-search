@@ -3,9 +3,9 @@
 
 Флоу:
   /start → инструкция, ждём ввода
-  Пользователь присылает ссылки на посевные посты и/или фразы вручную
-  Бот показывает список фраз и кнопки [Telegram] [ВКонтакте]
-  После выбора — ищет и отдаёт карточки
+  Пользователь присылает ссылки на посевные посты (и опционально свои фразы)
+  Бот парсит посты, извлекает ключевые словосочетания, показывает список
+  Пользователь может отредактировать фразы или сразу нажать [Telegram]/[ВКонтакте]
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -20,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.services.link_parser import parse_link
+from bot.services.link_parser import parse_link, extract_seeds_from_posts
 from bot.services.telemetr_search import search_telemetr
 from bot.services.vk_search import search_vk
 from bot.utils.formatting import esc, fmt_tg_summary, fmt_vk_summary, fmt_tg_card, fmt_vk_card
@@ -53,10 +54,10 @@ async def cmd_start(m: Message, state: FSMContext):
     await state.set_state(OrganicFlow.waiting_input)
     await m.answer(
         "Привет! Ищу органику по посевам.\n\n"
-        "Пришли в одном сообщении:\n"
-        "• ссылки на посевные посты (t.me/... или vk.com/wall...) — дату возьму из них\n"
-        "• и/или поисковые фразы вручную — по одной на строке\n\n"
-        "Потом выберешь где искать: Telegram или ВКонтакте."
+        "Пришли ссылки на посевные посты — t.me/... или vk.com/wall...\n"
+        "Можно сразу несколько в одном сообщении.\n\n"
+        "Фразы для поиска извлеку из текстов постов автоматически. "
+        "Или добавь свои — по одной строке после ссылок."
     )
 
 
@@ -64,39 +65,40 @@ async def cmd_start(m: Message, state: FSMContext):
 async def handle_input(m: Message, state: FSMContext):
     text = m.text or ""
 
-    # — парсим ссылки из сообщения
     urls = URL_RE.findall(text)
+
+    # — парсим все ссылки
+    parsing_msg = await m.answer("Читаю посты…")
     posts = []
     for url in urls:
         post = await parse_link(url)
         if post:
             posts.append(post)
+    await parsing_msg.delete()
 
-    # — ручные фразы: строки без ссылок длиной от 5 символов
+    # — ручные фразы: строки без ссылок
     text_no_urls = URL_RE.sub("", text)
     manual_seeds = [
         line.strip()
         for line in text_no_urls.splitlines()
-        if len(line.strip()) >= 5
+        if len(line.strip()) >= 4
     ]
 
-    # Итоговые фразы = только ручные.
-    # Текст посевов НЕ дробим автоматически — слишком шумно.
-    # Если ручных фраз нет, но есть посты — говорим об этом явно.
-    seeds = list(dict.fromkeys(manual_seeds))  # дедуп с сохранением порядка
-
-    if not posts and not seeds:
+    if not posts and not manual_seeds:
         await m.answer(
             "Не нашла ни ссылок, ни фраз.\n"
-            "Пришли ссылки на посты (t.me/... или vk.com/wall...) "
-            "и/или напиши поисковые фразы — по одной на строке."
+            "Пришли ссылки на посевные посты (t.me/... или vk.com/wall...)."
         )
         return
 
+    # — фразы: сначала ручные, потом автоизвлечённые из текстов постов
+    auto_seeds = extract_seeds_from_posts([p.text for p in posts if p.text]) if posts else []
+    seeds = list(dict.fromkeys(manual_seeds + auto_seeds))[:12]  # дедуп, макс 12
+
     if not seeds:
         await m.answer(
-            "Нашла посты, но не вижу поисковых фраз.\n"
-            "Напиши их вручную — по одной на строке (то, по чему искать органику)."
+            "Не удалось извлечь фразы из постов.\n"
+            "Напиши поисковые слова вручную — по одной строке."
         )
         return
 
@@ -104,21 +106,16 @@ async def handle_input(m: Message, state: FSMContext):
     timestamps = [p.timestamp for p in posts if p.timestamp > 0]
     since_ts = min(timestamps) if timestamps else int(time.time()) - ORGANIC_WINDOW_DAYS * 86400
     until_ts = since_ts + ORGANIC_WINDOW_DAYS * 86400
+    since_str = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
     await state.set_state(OrganicFlow.waiting_platform)
     await state.update_data(seeds=seeds, since_ts=since_ts, until_ts=until_ts)
 
-    seeds_preview = "\n".join(f"• {s}" for s in seeds[:10])
-    if len(seeds) > 10:
-        seeds_preview += f"\n… и ещё {len(seeds) - 10}"
-
-    from datetime import datetime, timezone
-    since_str = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-    until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-
+    seeds_preview = "\n".join(f"• {s}" for s in seeds)
     await m.answer(
+        f"<b>Посты:</b> {len(posts)} · <b>Диапазон:</b> {since_str} — {until_str}\n\n"
         f"<b>Фразы для поиска ({len(seeds)}):</b>\n{seeds_preview}\n\n"
-        f"<b>Диапазон:</b> {since_str} — {until_str}\n\n"
         "Где искать?",
         reply_markup=_platform_kb(),
     )
@@ -128,15 +125,15 @@ async def handle_input(m: Message, state: FSMContext):
 async def handle_platform(cb: CallbackQuery, state: FSMContext):
     platform = cb.data.split(":")[1]
     data = await state.get_data()
-    seeds: list[str]  = data.get("seeds", [])
-    since_ts: int     = data.get("since_ts", 0)
-    until_ts: int     = data.get("until_ts", 0)
+    seeds: list[str] = data.get("seeds", [])
+    since_ts: int    = data.get("since_ts", 0)
+    until_ts: int    = data.get("until_ts", 0)
 
     await state.clear()
     await cb.answer()
 
     label = "Telegram" if platform == "tg" else "ВКонтакте"
-    wait = await cb.message.edit_text(f"Ищу в {label}… это может занять 1–2 минуты.")
+    wait = await cb.message.edit_text(f"Ищу в {label}… может занять 1–2 минуты.")
 
     try:
         if platform == "tg":
@@ -155,7 +152,7 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
         await wait.edit_text(
             f"Ничего не найдено в {label}.\n\n"
             f"Фраз: {len(seeds)}\n"
-            f"Диагностика: {diag}"
+            f"Диагностика: <code>{esc(diag)}</code>"
         )
         await state.set_state(OrganicFlow.waiting_input)
         return
