@@ -1,124 +1,139 @@
-from typing import List, Dict, Optional
-import requests
-import logging
+# -*- coding: utf-8 -*-
+"""
+Поиск органики в Telegram через Telemetr API.
+"""
+from __future__ import annotations
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-# Пример токена и URL API — замените на актуальные значения
-TELEM_TOKEN = "YOUR_TELEM_TOKEN_HERE"  # замените на реальный токен
-TELEM_API_URL = "https://api.example.com/telemetry"  # замените на реальный URL
+import aiohttp
+
+TELEMETR_TOKEN         = os.getenv("TELEMETR_TOKEN", "").strip()
+TELEMETR_USE_QUOTES    = os.getenv("TELEMETR_USE_QUOTES", "1") == "1"
+TELEMETR_REQUIRE_EXACT = os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1"
+TELEMETR_TRUST_QUERY   = os.getenv("TELEMETR_TRUST_QUERY", "1") == "1"
+TELEMETR_MIN_VIEWS     = int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0)
+TELEMETR_PAGES         = max(1, int(os.getenv("TELEMETR_PAGES", "3") or 3))
+
+BASE_URL = "https://api.telemetr.me"
 
 
-def search_telemetr(
+def _normalize_seed(seed: str) -> str:
+    s = (seed or "").strip()
+    if TELEMETR_USE_QUOTES and s and not (s.startswith('"') and s.endswith('"')):
+        return f'"{s}"'
+    return s
+
+
+def _as_dict(it: Any) -> Dict[str, Any]:
+    if isinstance(it, dict):
+        return it
+    if isinstance(it, str):
+        return {"text": it}
+    return {}
+
+
+def _body_from_item(it: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for k in ("title", "text", "caption"):
+        v = (it.get(k) or "").strip()
+        if v:
+            parts.append(v)
+    return "\n".join(parts).strip()
+
+
+def _views_of(it: Dict[str, Any]) -> int:
+    v = it.get("views") or it.get("views_count") or 0
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+
+def _link_of(it: Dict[str, Any]) -> str:
+    return it.get("display_url") or it.get("url") or it.get("link") or ""
+
+
+def _ts_to_date(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+async def _fetch_page(
+    session: aiohttp.ClientSession,
     query: str,
-    since: str,  # формат: "YYYY-MM-DD"
-    until: str,  # формат: "YYYY-MM-DD"
+    since: str,
+    until: str,
+    page: int,
     limit: int = 50,
-    offset: int = 0
-) -> List[Dict]:
-    """
-    Функция поиска телеметрии по запросу.
-    Выполняет HTTP-запрос к API телеметрии и возвращает результаты.
+) -> Tuple[List[Any], Dict[str, Any]]:
+    if not TELEMETR_TOKEN:
+        raise RuntimeError("TELEMETR_TOKEN is not set")
+    params = {
+        "query": query,
+        "date_from": since,
+        "date_to": until,
+        "limit": str(limit),
+        "page": str(page),
+    }
+    headers = {"Authorization": f"Bearer {TELEMETR_TOKEN}"}
+    url = f"{BASE_URL}/channels/posts/search"
+    async with session.get(url, params=params, headers=headers, timeout=30) as resp:
+        data = await resp.json(content_type=None)
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            return [], {"error": data}
+        resp_obj = data.get("response") or {}
+        items = resp_obj.get("items") or []
+        return items, {"count": resp_obj.get("count")}
 
-    :param query: поисковый запрос (например, "error", "response_time")
-    :param since: начальная дата (включительно), формат "YYYY-MM-DD"
-    :param until: конечная дата (включительно), формат "YYYY-MM-DD"
-    :param limit: лимит результатов (максимум 1000)
-    :param offset: смещение для пагинации
-    :return: список словарей с результатами поиска
-    """
+
+async def search_telemetr(
+    seeds: List[str],
+    since_ts: int,
+    until_ts: int,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    since = _ts_to_date(since_ts)
+    until = _ts_to_date(until_ts)
+
+    seeds_raw = [s.strip() for s in (seeds or []) if s and s.strip()]
+    if not seeds_raw:
+        return [], "нет фраз для поиска"
+
+    seeds_q = [_normalize_seed(s) for s in seeds_raw]
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession()
+
+    matched: List[Dict[str, Any]] = []
     try:
-        headers = {
-            "Authorization": f"Bearer {TELEM_TOKEN}",
-            "Content-Type": "application/json"
-        }
+        for idx, raw_seed in enumerate(seeds_raw):
+            q = seeds_q[idx]
+            items_all: List[Any] = []
+            for page in range(1, TELEMETR_PAGES + 1):
+                items, _ = await _fetch_page(session, q, since, until, page)
+                items_all.extend(items)
+                if len(items) < 50:
+                    break
 
-        params = {
-            "q": query,
-            "since": since,
-            "until": until,
-            "limit": limit,
-            "offset": offset
-        }
+            for it in items_all:
+                d = _as_dict(it)
+                if not d:
+                    continue
+                if _views_of(d) < TELEMETR_MIN_VIEWS:
+                    continue
+                ok = True
+                if TELEMETR_REQUIRE_EXACT:
+                    body = _body_from_item(d)
+                    ok = (raw_seed in body) if body else TELEMETR_TRUST_QUERY
+                if ok:
+                    d["_seed"] = raw_seed
+                    d["_link"] = _link_of(d)
+                    matched.append(d)
 
-        response = requests.get(
-            TELEM_API_URL,
-            headers=headers,
-            params=params,
-            timeout=30
-        )
-
-        if response.status_code == 200:
-            logger.info("Телеметрия найдена: %s результатов", len(response.json()))
-            return response.json()
-        else:
-            logger.error(
-                "Ошибка при поиске телеметрии: %s, %s",
-                response.status_code,
-                response.text
-            )
-            return []
-
-    except requests.exceptions.RequestException as e:
-        logger.error("Ошибка сети при поиске телеметрии: %s", str(e))
-        return []
-    except Exception as e:
-        logger.error("Неожиданная ошибка: %s", str(e))
-        return []
-
-
-def get_telemetry_by_id(telemetry_id: str) -> Optional[Dict]:
-    """
-    Получить детальную информацию о телеметрии по ID.
-
-    :param telemetry_id: ID записи телеметрии
-    :return: словарь с данными или None, если не найдено
-    """
-    try:
-        headers = {"Authorization": f"Bearer {TELEM_TOKEN}"}
-        response = requests.get(
-            f"{TELEM_API_URL}/{telemetry_id}",
-            headers=headers,
-            timeout=30
-        )
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.error("Ошибка получения телеметрии: %s", response.text)
-            return None
-
-    except Exception as e:
-        logger.error("Ошибка при получении телеметрии: %s", str(e))
-        return None
-
-
-def filter_telemetry_by_status(telemetry_list: List[Dict], status: str) -> List[Dict]:
-    """
-    Фильтрация телеметрии по статусу.
-
-    :param telemetry_list: список записей телеметрии
-    :param status: статус для фильтрации (например, "error", "warning")
-    :return: отфильтрованный список
-    """
-    return [item for item in telemetry_list if item.get("status") == status]
-
-
-# Пример использования (можно удалить или закомментировать)
-if __name__ == "__main__":
-    # Пример поиска ошибок за последнюю неделю
-    results = search_telemetr(
-        query="error",
-        since="2023-10-01",
-        until="2023-10-07",
-        limit=10
-    )
-    print("Найденные ошибки:", results)
-
-    # Пример получения детальной информации
-    if results:
-        first_item = results[0]
-        detailed = get_telemetry_by_id(first_item["id"])
-        print("Детальная информация:", detailed)
+        diag = f"seeds={len(seeds_raw)}, matched={len(matched)}, range={since}–{until}"
+        return matched, diag
+    finally:
+        if own and session:
+            await session.close()
