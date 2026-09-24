@@ -141,77 +141,50 @@ async def parse_link(url: str) -> Optional[ParsedPost]:
     return None
 
 
-def _clean_text(text: str) -> str:
-    """Убирает ссылки, эмодзи, лишние пробелы. Сохраняет оригинальный порядок слов."""
+def _clean_for_sentences(text: str) -> str:
+    """Убирает ссылки и эмодзи, оставляет пунктуацию для разбивки на предложения."""
     text = re.sub(r"https?://\S+", "", text)
-    # убираем эмодзи через диапазон Unicode
-    text = re.sub(r"[\U00010000-\U0010ffff]", "", text)
-    # убираем спецсимволы кроме букв, цифр, пробелов, дефиса, точки
-    text = re.sub(r"[^\w\s\-\.]", " ", text, flags=re.UNICODE)
+    # эмодзи (основные блоки Unicode)
+    text = re.sub(r"[\U0001F300-\U0001FFFF]", "", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def _token_words(text: str) -> list[str]:
-    """Токенизирует текст в слова, сохраняя оригинальный регистр и порядок."""
-    clean = _clean_text(text)
-    # берём только слова из букв (без цифр, знаков)
-    return re.findall(r"[а-яёА-ЯЁa-zA-Z]+", clean)
-
-
 def extract_seeds_from_posts(texts: list[str]) -> list[str]:
     """
-    Извлекает поисковые фразы — скользящие окна 4 слов из оригинального текста.
+    Извлекает поисковые фразы из текстов посевов.
 
-    Органика чаще всего является дословным копипастом посева, поэтому:
-    - сохраняем оригинальный порядок и регистр слов
-    - берём окна по 4 слова (достаточно уникально, не слишком длинно)
-    - пропускаем окна где есть стоп-слова (служебные, вопросительные и т.д.)
-    - приоритет фразам которые встречаются в нескольких посевах
+    Органика — это чаще всего дословный копипаст посева.
+    Поэтому берём целые предложения из текста как есть, без разбивки на слова.
+
+    Фильтры:
+    - минимум 20 символов (отсекает "Только смешные ответы", "Что там?")
+    - максимум 120 символов (слишком длинное плохо ищется)
+    - не начинается с вопросительного или восклицательного слова
     """
     if not texts:
         return []
 
-    from collections import Counter
-    phrase_count: Counter = Counter()
-    all_phrases: list[str] = []
+    QUESTION_STARTS = {"ваши", "что", "как", "где", "кто", "зачем", "почему",
+                       "только", "ваш", "напишите", "расскажите"}
+
+    seen: set[str] = set()
+    result: list[str] = []
 
     for text in texts:
-        words = _token_words(text)
-        seen_in_this_text: set[str] = set()
+        clean = _clean_for_sentences(text)
+        # разбиваем по . ! ? и переносам строк
+        sentences = re.split(r"[.!?\n]+", clean)
+        for s in sentences:
+            s = s.strip().strip(",")
+            if len(s) < 20 or len(s) > 120:
+                continue
+            # отсекаем вопросы и призывы
+            first_word = s.split()[0].lower().rstrip("?!,.")
+            if first_word in QUESTION_STARTS:
+                continue
+            if s not in seen:
+                seen.add(s)
+                result.append(s)
 
-        for size in (4, 3):  # сначала 4 слова, потом 3
-            for i in range(len(words) - size + 1):
-                window = words[i:i + size]
-                # пропускаем если первое, последнее или более 1 слова в окне — стоп-слово
-                stop_count = sum(1 for w in window if w.lower() in _STOPWORDS)
-                if window[0].lower() in _STOPWORDS or window[-1].lower() in _STOPWORDS or stop_count > 1:
-                    continue
-                phrase = " ".join(window)
-                if phrase not in seen_in_this_text:
-                    seen_in_this_text.add(phrase)
-                    phrase_count[phrase] += 1
-                    all_phrases.append(phrase)
-
-    if not phrase_count:
-        return []
-
-    # Сортируем: сначала те что встречаются в нескольких посевах, потом длиннее
-    def _score(phrase: str) -> tuple:
-        return (phrase_count[phrase], len(phrase.split()))
-
-    # Дедуп с сохранением порядка важности
-    seen: set[str] = set()
-    chosen: list[str] = []
-    for phrase in sorted(set(all_phrases), key=_score, reverse=True):
-        if phrase in seen:
-            continue
-        # не берём если эта фраза — подстрока уже выбранной
-        if any(phrase in ch for ch in chosen):
-            continue
-        seen.add(phrase)
-        chosen.append(phrase)
-        if len(chosen) >= 6:
-            break
-
-    return chosen
+    return result[:8]
