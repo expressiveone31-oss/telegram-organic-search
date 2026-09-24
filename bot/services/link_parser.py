@@ -142,85 +142,75 @@ async def parse_link(url: str) -> Optional[ParsedPost]:
 
 
 def _clean_text(text: str) -> str:
-    """Убирает ссылки, спецсимволы, эмодзи, лишние пробелы."""
+    """Убирает ссылки, эмодзи, лишние пробелы. Сохраняет оригинальный порядок слов."""
     text = re.sub(r"https?://\S+", "", text)
-    # убираем эмодзи и спецсимволы (всё что не буква/цифр/пробел/дефис)
-    text = re.sub(r"[^\w\s\-]", " ", text, flags=re.UNICODE)
+    # убираем эмодзи через диапазон Unicode
+    text = re.sub(r"[\U00010000-\U0010ffff]", "", text)
+    # убираем спецсимволы кроме букв, цифр, пробелов, дефиса, точки
+    text = re.sub(r"[^\w\s\-\.]", " ", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def _words_from_text(text: str) -> list[str]:
-    """Слова 4+ букв, не стоп-слова."""
-    return [
-        w.lower()
-        for w in re.findall(r"[а-яёА-ЯЁa-zA-Z]{4,}", _clean_text(text))
-        if w.lower() not in _STOPWORDS
-    ]
+def _token_words(text: str) -> list[str]:
+    """Токенизирует текст в слова, сохраняя оригинальный регистр и порядок."""
+    clean = _clean_text(text)
+    # берём только слова из букв (без цифр, знаков)
+    return re.findall(r"[а-яёА-ЯЁa-zA-Z]+", clean)
 
 
 def extract_seeds_from_posts(texts: list[str]) -> list[str]:
     """
-    Извлекает поисковые фразы из текстов посевов.
+    Извлекает поисковые фразы — скользящие окна 4 слов из оригинального текста.
 
-    Стратегия:
-    1. Из каждого текста берём окна 3-4 значимых слова (триграммы и квадраграммы)
-    2. Приоритет — фразы чьи слова встречаются в НЕСКОЛЬКИХ посевах
-       (это и есть общая тема, а не уникальная формулировка одного поста)
-    3. Отсекаем фразы где есть слово короче 4 букв — значит туда попало
-       служебное слово
+    Органика чаще всего является дословным копипастом посева, поэтому:
+    - сохраняем оригинальный порядок и регистр слов
+    - берём окна по 4 слова (достаточно уникально, не слишком длинно)
+    - пропускаем окна где есть стоп-слова (служебные, вопросительные и т.д.)
+    - приоритет фразам которые встречаются в нескольких посевах
     """
     if not texts:
         return []
 
-    # Слова из каждого текста
-    per_text: list[list[str]] = [_words_from_text(t) for t in texts]
-
-    # Частота слов по всем текстам (в скольких текстах встречается)
     from collections import Counter
-    word_doc_freq: Counter = Counter()
-    for words in per_text:
-        for w in set(words):
-            word_doc_freq[w] += 1
+    phrase_count: Counter = Counter()
+    all_phrases: list[str] = []
 
-    seeds: list[str] = []
+    for text in texts:
+        words = _token_words(text)
+        seen_in_this_text: set[str] = set()
 
-    for words in per_text:
-        # Только триграммы — квадраграммы слишком часто захватывают случайные слова
-        for size in (3,):
+        for size in (4, 3):  # сначала 4 слова, потом 3
             for i in range(len(words) - size + 1):
-                phrase_words = words[i:i + size]
-                # Все слова должны быть 4+ букв (стоп-слова уже отфильтрованы,
-                # но могут проскочить короткие нейтральные)
-                if any(len(w) < 4 for w in phrase_words):
+                window = words[i:i + size]
+                # пропускаем если первое, последнее или более 1 слова в окне — стоп-слово
+                stop_count = sum(1 for w in window if w.lower() in _STOPWORDS)
+                if window[0].lower() in _STOPWORDS or window[-1].lower() in _STOPWORDS or stop_count > 1:
                     continue
-                phrase = " ".join(phrase_words)
-                seeds.append((phrase, phrase_words))
+                phrase = " ".join(window)
+                if phrase not in seen_in_this_text:
+                    seen_in_this_text.add(phrase)
+                    phrase_count[phrase] += 1
+                    all_phrases.append(phrase)
 
-    if not seeds:
+    if not phrase_count:
         return []
 
-    # Сортируем: сначала фразы где больше слов встречается в нескольких текстах
-    def _score(item: tuple) -> float:
-        phrase, words = item
-        if len(texts) == 1:
-            return float(len(words))
-        cross_text_score = sum(word_doc_freq[w] for w in words)
-        return float(cross_text_score * len(words))
+    # Сортируем: сначала те что встречаются в нескольких посевах, потом длиннее
+    def _score(phrase: str) -> tuple:
+        return (phrase_count[phrase], len(phrase.split()))
 
-    seeds.sort(key=_score, reverse=True)
-
-    # Дедупликация: не берём фразу если она подстрока уже выбранной
+    # Дедуп с сохранением порядка важности
+    seen: set[str] = set()
     chosen: list[str] = []
-    chosen_set: set[str] = set()
-    for phrase, _ in seeds:
-        if phrase in chosen_set:
+    for phrase in sorted(set(all_phrases), key=_score, reverse=True):
+        if phrase in seen:
             continue
-        # не добавляем если эта фраза уже содержится в более длинной выбранной
-        already_covered = any(phrase in ch for ch in chosen)
-        if not already_covered:
-            chosen.append(phrase)
-            chosen_set.add(phrase)
+        # не берём если эта фраза — подстрока уже выбранной
+        if any(phrase in ch for ch in chosen):
+            continue
+        seen.add(phrase)
+        chosen.append(phrase)
         if len(chosen) >= 6:
             break
 

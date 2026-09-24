@@ -27,7 +27,7 @@ def _cfg() -> Dict[str, Any]:
     )
     cfg = {
         "token":         os.getenv("TELEMETR_TOKEN", "").strip(),
-        "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "0") == "1",
+        "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "1") == "1",
         "require_exact": os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1",
         "min_views":     int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0),
         "pages":         pages,
