@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Tuple
 
 import httpx
 
+from bot.services import cache
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.telemetr.me"
@@ -166,13 +168,33 @@ async def search_telemetr(
     async with httpx.AsyncClient() as client:
         for raw_seed in seeds:
             q = _normalize_seed(raw_seed, cfg["use_quotes"])
-            items_all: List[Any] = []
+            ckey = cache.make_key("tg", q, since, until, cfg["pages"])
 
-            for page in range(1, cfg["pages"] + 1):
-                items = await _fetch_page(client, cfg["token"], q, since, until, page)
-                items_all.extend(items)
-                if len(items) < 50:
-                    break
+            cached = cache.get(ckey)
+            if cached is not None:
+                items_all: List[Any] = cached
+                logger.info("Telemetr seed=%r: %d items from cache", raw_seed, len(items_all))
+            else:
+                items_all = []
+                for page in range(1, cfg["pages"] + 1):
+                    items = await _fetch_page(client, cfg["token"], q, since, until, page)
+                    if not items:
+                        break
+                    items_all.extend(items)
+
+                    # Страница без единого дословного совпадения — дальше только шум,
+                    # который всё равно отсеется. Не тратим на него запросы.
+                    page_hits = sum(
+                        1 for it in items
+                        if isinstance(it, dict) and _contains_seed(raw_seed, _body_of(it))
+                    )
+                    if page_hits == 0:
+                        logger.info("Telemetr seed=%r: stop at page %d, no exact hits", raw_seed, page)
+                        break
+                    if len(items) < 50:
+                        break
+
+                cache.set(ckey, items_all)
 
             logger.info("Telemetr seed=%r fetched=%d", raw_seed, len(items_all))
 
@@ -212,7 +234,8 @@ async def search_telemetr(
 
     diag = (
         f"seeds={len(seeds)}, matched={len(matched)}, "
-        f"no_match={skipped_no_match}, no_body={skipped_no_body}, range={since}–{until}"
+        f"no_match={skipped_no_match}, no_body={skipped_no_body}, "
+        f"range={since}–{until}, {cache.stats()}"
     )
     logger.info("Telemetr done: %s", diag)
     return matched, diag

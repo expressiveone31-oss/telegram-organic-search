@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Tuple
 
 import httpx
 
+from bot.services import cache
+
 logger = logging.getLogger(__name__)
 
 VK_API = "https://api.vk.com/method"
@@ -67,55 +69,70 @@ async def search_vk(
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
-            fetched = 0
+            ckey = cache.make_key("vk", seed, since_ts, until_ts, cfg["max_pages"])
+
+            cached = cache.get(ckey)
+            if cached is not None:
+                items_all: List[Dict[str, Any]] = cached
+                logger.info("VK seed=%r: %d items from cache", seed, len(items_all))
+            else:
+                items_all = []
+                next_from = None
+
+                for _page in range(cfg["max_pages"]):
+                    params: Dict[str, Any] = {
+                        "q": seed,
+                        "count": 50,
+                        "start_time": since_ts,
+                        "end_time": until_ts,
+                    }
+                    if next_from:
+                        params["start_from"] = next_from
+
+                    try:
+                        resp = await _call(client, cfg["token"], "newsfeed.search", params)
+                    except Exception as e:
+                        logger.error("VK search error seed=%r: %s", seed, e)
+                        break
+
+                    items = resp.get("items", [])
+                    next_from = resp.get("next_from")
+                    if not items:
+                        break
+                    items_all.extend(items)
+
+                    # Страница без дословных совпадений — дальше только шум
+                    if not any(_contains(seed, it.get("text") or "") for it in items):
+                        logger.info("VK seed=%r: stop at page %d, no exact hits", seed, _page + 1)
+                        break
+                    if not next_from:
+                        break
+
+                cache.set(ckey, items_all)
+
             matched = 0
-            next_from = None
+            for it in items_all:
+                views = (it.get("views") or {}).get("count", 0)
+                if views < cfg["min_views"]:
+                    continue
+                text = it.get("text") or ""
+                if not text:
+                    continue
+                if cfg["strict"] and not _contains(seed, text):
+                    continue
+                matched += 1
+                owner_id = it.get("owner_id")
+                post_id = it.get("id")
+                results.append({
+                    "date":    it.get("date", 0),
+                    "views":   views,
+                    "url":     f"https://vk.com/wall{owner_id}_{post_id}",
+                    "excerpt": text[:200] + ("…" if len(text) > 200 else ""),
+                    "_seed":   seed,
+                })
 
-            for _page in range(cfg["max_pages"]):
-                params: Dict[str, Any] = {
-                    "q": seed,
-                    "count": 50,
-                    "start_time": since_ts,
-                    "end_time": until_ts,
-                }
-                if next_from:
-                    params["start_from"] = next_from
-
-                try:
-                    resp = await _call(client, cfg["token"], "newsfeed.search", params)
-                except Exception as e:
-                    logger.error("VK search error seed=%r: %s", seed, e)
-                    break
-
-                items = resp.get("items", [])
-                next_from = resp.get("next_from")
-                fetched += len(items)
-
-                for it in items:
-                    views = (it.get("views") or {}).get("count", 0)
-                    if views < cfg["min_views"]:
-                        continue
-                    text = it.get("text") or ""
-                    if not text:
-                        continue
-                    if cfg["strict"] and not _contains(seed, text):
-                        continue
-                    matched += 1
-                    owner_id = it.get("owner_id")
-                    post_id = it.get("id")
-                    results.append({
-                        "date":    it.get("date", 0),
-                        "views":   views,
-                        "url":     f"https://vk.com/wall{owner_id}_{post_id}",
-                        "excerpt": text[:200] + ("…" if len(text) > 200 else ""),
-                        "_seed":   seed,
-                    })
-
-                if not next_from or not items:
-                    break
-
-            logger.info("VK seed=%r fetched=%d matched=%d", seed, fetched, matched)
-            diag_parts.append(f"'{seed}': {matched}/{fetched}")
+            logger.info("VK seed=%r fetched=%d matched=%d", seed, len(items_all), matched)
+            diag_parts.append(f"'{seed}': {matched}/{len(items_all)}")
 
     results.sort(key=lambda r: r["date"], reverse=True)
-    return results, "VK: " + "; ".join(diag_parts)
+    return results, "VK: " + "; ".join(diag_parts) + f" | {cache.stats()}"

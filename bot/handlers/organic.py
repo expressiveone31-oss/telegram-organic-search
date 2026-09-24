@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -61,7 +61,7 @@ async def cmd_start(m: Message, state: FSMContext):
     )
 
 
-@router.message(OrganicFlow.waiting_input, F.text)
+@router.message(StateFilter(OrganicFlow.waiting_input, OrganicFlow.waiting_platform), F.text)
 async def handle_input(m: Message, state: FSMContext):
     text = m.text or ""
 
@@ -129,7 +129,8 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
     since_ts: int    = data.get("since_ts", 0)
     until_ts: int    = data.get("until_ts", 0)
 
-    await state.clear()
+    # Состояние не чистим: фразы остаются, чтобы поиск по второй соцсети
+    # не требовал заново присылать ссылки и заново парсить посты.
     await cb.answer()
 
     label = "Telegram" if platform == "tg" else "ВКонтакте"
@@ -143,7 +144,7 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.error("Search error platform=%s: %s", platform, e, exc_info=True)
         await wait.edit_text(f"Ошибка поиска: <code>{esc(str(e))}</code>")
-        await state.set_state(OrganicFlow.waiting_input)
+        await state.set_state(OrganicFlow.waiting_platform)
         return
 
     logger.info("Search done platform=%s results=%d diag=%s", platform, len(results), diag)
@@ -152,9 +153,10 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
         await wait.edit_text(
             f"Ничего не найдено в {label}.\n\n"
             f"Фраз: {len(seeds)}\n"
-            f"Диагностика: <code>{esc(diag)}</code>"
+            f"Диагностика: <code>{esc(diag)}</code>",
+            reply_markup=_platform_kb(),
         )
-        await state.set_state(OrganicFlow.waiting_input)
+        await state.set_state(OrganicFlow.waiting_platform)
         return
 
     if platform == "tg":
@@ -177,5 +179,9 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
     if ORGANIC_DEBUG:
         await cb.message.answer(f"Диагностика: <code>{esc(diag)}</code>\nФразы: {seeds}")
 
-    await state.set_state(OrganicFlow.waiting_input)
-    await cb.message.answer("Готово! Можешь прислать следующий посев.")
+    await state.set_state(OrganicFlow.waiting_platform)
+    await cb.message.answer(
+        "Готово! Можно поискать те же фразы в другой соцсети "
+        "или прислать следующий посев.",
+        reply_markup=_platform_kb(),
+    )
