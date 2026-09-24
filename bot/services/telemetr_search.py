@@ -49,7 +49,14 @@ def _normalize_seed(seed: str, use_quotes: bool) -> str:
 
 
 def _views_of(it: Dict[str, Any]) -> int:
-    v = it.get("views") or it.get("views_count") or 0
+    # Telemetr search API возвращает просмотры в stats.views, не в корне
+    v = (
+        it.get("views")
+        or it.get("views_count")
+        or (it.get("stats") or {}).get("views")
+        or (it.get("stats") or {}).get("views_count")
+        or 0
+    )
     try:
         return int(v)
     except Exception:
