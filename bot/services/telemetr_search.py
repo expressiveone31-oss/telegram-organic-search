@@ -136,10 +136,23 @@ async def search_telemetr(
 
             logger.info("Telemetr seed=%r fetched=%d", raw_seed, len(items_all))
 
+            # Лог первого результата для диагностики структуры ответа
+            if items_all:
+                first = items_all[0]
+                logger.info("Telemetr first item keys=%s views=%s link=%s",
+                            list(first.keys()) if isinstance(first, dict) else type(first),
+                            _views_of(first) if isinstance(first, dict) else "?",
+                            _link_of(first) if isinstance(first, dict) else "?")
+            else:
+                logger.info("Telemetr seed=%r: zero items from API", raw_seed)
+
+            skipped_views = 0
             for it in items_all:
                 if not isinstance(it, dict):
                     continue
-                if _views_of(it) < cfg["min_views"]:
+                v = _views_of(it)
+                if v < cfg["min_views"]:
+                    skipped_views += 1
                     continue
                 if cfg["require_exact"]:
                     body = _body_of(it)
@@ -148,6 +161,9 @@ async def search_telemetr(
                 it["_seed"] = raw_seed
                 it["_link"] = _link_of(it)
                 matched.append(it)
+
+            if skipped_views:
+                logger.info("Telemetr seed=%r: skipped %d by min_views=%d", raw_seed, skipped_views, cfg["min_views"])
 
     diag = f"seeds={len(seeds)}, matched={len(matched)}, range={since}–{until}"
     logger.info("Telemetr done: %s", diag)
