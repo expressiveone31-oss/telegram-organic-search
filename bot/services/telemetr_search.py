@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
@@ -66,23 +68,36 @@ def _link_of(it: Dict[str, Any]) -> str:
     return it.get("display_url") or it.get("url") or it.get("link") or ""
 
 
+# Telemetr не гарантирует имя поля с текстом поста, поэтому собираем из всех известных
+_TEXT_KEYS = (
+    "title", "text", "caption", "message", "post_text",
+    "body", "content", "snippet", "description",
+)
+
+
 def _body_of(it: Dict[str, Any]) -> str:
-    return " ".join(
-        (it.get(k) or "").strip()
-        for k in ("title", "text", "caption")
-    ).strip()
+    parts: List[str] = []
+    for key in _TEXT_KEYS:
+        val = it.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        elif isinstance(val, dict):
+            for nested in val.values():
+                if isinstance(nested, str) and nested.strip():
+                    parts.append(nested.strip())
+    return " ".join(parts).strip()
+
+
+_QUOTES_RE = re.compile(r"[«»„“”\"'`]")
+_SPACES_RE = re.compile(r"\s+")
 
 
 def _normalize(s: str) -> str:
     """Нормализует текст для сравнения: нижний регистр, убирает кавычки и лишние пробелы."""
-    import unicodedata
-    s = s.lower()
-    # заменяем все виды кавычек на пустоту
-    s = re.sub(r"[«»„""\"\'`]", "", s)
-    s = unicodedata.normalize("NFKC", s)
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    s = _QUOTES_RE.sub("", s)
     s = s.replace("ё", "е")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    return _SPACES_RE.sub(" ", s).strip()
 
 
 def _contains_seed(seed: str, body: str) -> bool:
@@ -145,6 +160,8 @@ async def search_telemetr(
         return [], "нет фраз для поиска"
 
     matched: List[Dict[str, Any]] = []
+    skipped_no_body = 0
+    skipped_no_match = 0
 
     async with httpx.AsyncClient() as client:
         for raw_seed in seeds:
@@ -177,9 +194,14 @@ async def search_telemetr(
                 if v < cfg["min_views"]:
                     skipped_views += 1
                     continue
-                # Всегда проверяем точное вхождение фразы — Telemetr кавычки игнорирует
+                # Всегда проверяем точное вхождение фразы — Telemetr кавычки игнорирует.
+                # Пост без распознанного текста отбрасываем: проверить его нечем.
                 body = _body_of(it)
-                if body and not _contains_seed(raw_seed, body):
+                if not body:
+                    skipped_no_body += 1
+                    continue
+                if not _contains_seed(raw_seed, body):
+                    skipped_no_match += 1
                     continue
                 it["_seed"] = raw_seed
                 it["_link"] = _link_of(it)
@@ -188,6 +210,9 @@ async def search_telemetr(
             if skipped_views:
                 logger.info("Telemetr seed=%r: skipped %d by min_views=%d", raw_seed, skipped_views, cfg["min_views"])
 
-    diag = f"seeds={len(seeds)}, matched={len(matched)}, range={since}–{until}"
+    diag = (
+        f"seeds={len(seeds)}, matched={len(matched)}, "
+        f"no_match={skipped_no_match}, no_body={skipped_no_body}, range={since}–{until}"
+    )
     logger.info("Telemetr done: %s", diag)
     return matched, diag
