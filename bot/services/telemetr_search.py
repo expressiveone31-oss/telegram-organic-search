@@ -28,12 +28,11 @@ def _cfg() -> Dict[str, Any]:
     cfg = {
         "token":         os.getenv("TELEMETR_TOKEN", "").strip(),
         "use_quotes":    os.getenv("TELEMETR_USE_QUOTES", "1") == "1",
-        "require_exact": os.getenv("TELEMETR_REQUIRE_EXACT", "0") == "1",
         "min_views":     int(os.getenv("TELEMETR_MIN_VIEWS", "0") or 0),
         "pages":         pages,
     }
-    logger.info("Telemetr cfg: pages=%d min_views=%d use_quotes=%s require_exact=%s",
-                cfg["pages"], cfg["min_views"], cfg["use_quotes"], cfg["require_exact"])
+    logger.info("Telemetr cfg: pages=%d min_views=%d use_quotes=%s",
+                cfg["pages"], cfg["min_views"], cfg["use_quotes"])
     return cfg
 
 
@@ -72,6 +71,23 @@ def _body_of(it: Dict[str, Any]) -> str:
         (it.get(k) or "").strip()
         for k in ("title", "text", "caption")
     ).strip()
+
+
+def _normalize(s: str) -> str:
+    """Нормализует текст для сравнения: нижний регистр, убирает кавычки и лишние пробелы."""
+    import unicodedata
+    s = s.lower()
+    # заменяем все виды кавычек на пустоту
+    s = re.sub(r"[«»„""\"\'`]", "", s)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("ё", "е")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _contains_seed(seed: str, body: str) -> bool:
+    """Проверяет что тело поста содержит фразу посева (нормализованно)."""
+    return _normalize(seed) in _normalize(body)
 
 
 async def _fetch_page(
@@ -161,10 +177,10 @@ async def search_telemetr(
                 if v < cfg["min_views"]:
                     skipped_views += 1
                     continue
-                if cfg["require_exact"]:
-                    body = _body_of(it)
-                    if body and raw_seed not in body:
-                        continue
+                # Всегда проверяем точное вхождение фразы — Telemetr кавычки игнорирует
+                body = _body_of(it)
+                if body and not _contains_seed(raw_seed, body):
+                    continue
                 it["_seed"] = raw_seed
                 it["_link"] = _link_of(it)
                 matched.append(it)
