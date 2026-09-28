@@ -27,7 +27,7 @@ def _stub_pages(monkeypatch, pages):
 
     async def fake_fetch(client, token, query, since, until, page):
         requested.append(page)
-        return pages.get(page, [])
+        return pages.get(page, []), {}
 
     monkeypatch.setattr(telemetr_search, "_fetch_page", fake_fetch)
     return requested
@@ -35,7 +35,7 @@ def _stub_pages(monkeypatch, pages):
 
 def _full_page(text, page=1):
     return [
-        {"text": text, "stats": {"views": 1000}, "url": f"https://t.me/ch/{page}{i:03d}"}
+        {"text": text, "stats": {"views": 1000}, "link": f"t.me/ch/{page}{i:03d}"}
         for i in range(50)
     ]
 

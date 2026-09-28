@@ -78,38 +78,55 @@ def _post_id_of(it: Dict[str, Any]) -> str:
     return m.group(1) if m else ""
 
 
-def _channel_of(it: Dict[str, Any]) -> Dict[str, Any]:
-    ch = it.get("channel")
-    return ch if isinstance(ch, dict) else {}
+def _channel_of(it: Dict[str, Any], channels: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Telemetr кладёт в пост только channel_id; данные канала — отдельным блоком."""
+    inline = it.get("channel")
+    if isinstance(inline, dict):
+        return inline
+    cid = it.get("channel_id")
+    if channels and cid is not None:
+        return channels.get(str(cid)) or {}
+    return {}
 
 
-def _link_of(it: Dict[str, Any]) -> str:
+def _username_from_link(link: str) -> str:
+    m = re.search(r"t\.me/(?:s/)?([A-Za-z0-9_]{4,})/\d+", link or "")
+    return m.group(1) if m and m.group(1) != "joinchat" else ""
+
+
+def _internal_id(cid: Any) -> str:
+    """-1001105810677 и 1105810677 — одно и то же, t.me/c/ хочет вариант без -100."""
+    s = str(cid or "").lstrip("-")
+    if not s.isdigit():
+        return ""
+    return s[3:] if len(s) > 10 and s.startswith("100") else s
+
+
+def _link_of(it: Dict[str, Any], channels: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
     """
-    Ссылка на пост. Приватные каналы Telemetr отдаёт как t.me/joinchat/<hash>/<id> —
-    это не открывается, инвайт-хэш к тому же протухает. Собираем ссылку сами.
+    Ссылка на пост. Telemetr отдаёт её без схемы, а для приватных каналов —
+    как t.me/joinchat/<hash>/<id>: не открывается, да и инвайт-хэш протухает.
     """
-    raw = (it.get("display_url") or it.get("url") or it.get("link") or "").strip()
+    raw = (it.get("link") or it.get("display_url") or it.get("url") or "").strip()
+    if raw and not raw.startswith("http"):
+        raw = "https://" + raw.lstrip("/")
     if raw and "/joinchat/" not in raw and "/+" not in raw:
         return raw
 
-    ch = _channel_of(it)
     post_id = _post_id_of(it)
     if not post_id:
         return raw
 
+    ch = _channel_of(it, channels)
     username = ch.get("username") or ch.get("link") or it.get("username") or ""
-    username = str(username).lstrip("@").replace("https://t.me/", "").strip("/")
+    username = str(username).lstrip("@").replace("https://t.me/", "").replace("t.me/", "").strip("/")
     if username and username.isascii() and "/" not in username:
         return f"https://t.me/{username}/{post_id}"
 
     # приватный канал без юзернейма — внутренняя ссылка t.me/c/<id>/<post>
-    for key in ("tg_id", "telegram_id", "id"):
-        cid = ch.get(key)
-        if isinstance(cid, (int, str)) and str(cid).lstrip("-").isdigit():
-            short = str(cid).lstrip("-")
-            short = short[3:] if short.startswith("100") else short
-            if short:
-                return f"https://t.me/c/{short}/{post_id}"
+    short = _internal_id(it.get("channel_id") or ch.get("tg_id") or ch.get("id"))
+    if short:
+        return f"https://t.me/c/{short}/{post_id}"
     return raw
 
 
@@ -171,7 +188,7 @@ async def _fetch_page(
     since: str,
     until: str,
     page: int,
-) -> List[Any]:
+) -> Tuple[List[Any], Dict[str, Dict[str, Any]]]:
     params = {
         "query": query,
         "date_from": since,
@@ -191,16 +208,31 @@ async def _fetch_page(
         data = r.json()
     except httpx.HTTPStatusError as e:
         logger.error("Telemetr HTTP %s for query=%r: %s", e.response.status_code, query, e.response.text[:200])
-        return []
+        return [], {}
     except Exception as e:
         logger.error("Telemetr request failed for query=%r: %s", query, e)
-        return []
+        return [], {}
 
     if not isinstance(data, dict) or data.get("status") != "ok":
         logger.error("Telemetr bad response for query=%r: %s", query, str(data)[:300])
-        return []
+        return [], {}
 
-    return (data.get("response") or {}).get("items") or []
+    resp = data.get("response") or {}
+    return resp.get("items") or [], _index_channels(resp.get("channels"))
+
+
+def _index_channels(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """Справочник каналов из ответа: приходит списком либо словарём по id."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if isinstance(raw, list):
+        for ch in raw:
+            if isinstance(ch, dict) and ch.get("id") is not None:
+                out[str(ch["id"])] = ch
+    elif isinstance(raw, dict):
+        for key, ch in raw.items():
+            if isinstance(ch, dict):
+                out[str(ch.get("id", key))] = ch
+    return out
 
 
 async def search_telemetr(
@@ -232,16 +264,19 @@ async def search_telemetr(
 
             cached = cache.get(ckey)
             if cached is not None:
-                items_all: List[Any] = cached
+                items_all: List[Any] = cached["items"]
+                channels: Dict[str, Dict[str, Any]] = cached["channels"]
                 logger.info("Telemetr seed=%r: %d items from cache", raw_seed, len(items_all))
             else:
                 items_all = []
+                channels = {}
                 barren = 0
                 for page in range(1, cfg["pages"] + 1):
-                    items = await _fetch_page(client, cfg["token"], q, since, until, page)
+                    items, page_channels = await _fetch_page(client, cfg["token"], q, since, until, page)
                     if not items:
                         break
                     items_all.extend(items)
+                    channels.update(page_channels)
 
                     # Выдача Telemetr не строго отсортирована по релевантности, поэтому
                     # останавливаемся только после двух пустых страниц подряд.
@@ -256,7 +291,7 @@ async def search_telemetr(
                     if len(items) < 50:
                         break
 
-                cache.set(ckey, items_all)
+                cache.set(ckey, {"items": items_all, "channels": channels})
 
             logger.info("Telemetr seed=%r fetched=%d", raw_seed, len(items_all))
 
@@ -290,8 +325,8 @@ async def search_telemetr(
                     skipped_no_match += 1
                     continue
 
-                link = _link_of(it)
-                dedup_key = link or f"{_channel_of(it).get('id')}_{_post_id_of(it)}"
+                link = _link_of(it, channels)
+                dedup_key = link or f"{it.get('channel_id')}_{_post_id_of(it)}"
                 if dedup_key in seen:
                     skipped_dupes += 1
                     continue
@@ -300,6 +335,8 @@ async def search_telemetr(
                 it["_seed"] = raw_seed
                 it["_link"] = link
                 it["_views"] = v
+                it["_channel"] = _channel_of(it, channels)
+                it["_username"] = _username_from_link(link)
                 matched.append(it)
 
             if skipped_views:

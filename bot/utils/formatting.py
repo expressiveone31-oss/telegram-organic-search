@@ -47,18 +47,21 @@ def _fmt_date(value: Any) -> str:
 
 
 def fmt_tg_card(it: Dict[str, Any]) -> str:
-    ch = it.get("channel") or {}
-    ch_title = ch.get("title") or ch.get("name") or "Telegram"
+    ch = it.get("_channel") or it.get("channel") or {}
+    username = it.get("_username") or ""
+    ch_title = ch.get("title") or ch.get("name") or (f"@{username}" if username else "Telegram")
     dt = _fmt_date(it.get("date") or it.get("published_at"))
-    # _views считает search_telemetr, он же умеет доставать stats.views
-    v = it.get("_views") or it.get("views") or it.get("views_count") or 0
+    # _views считает search_telemetr; в выдаче поиска Telemetr их часто просто нет
+    v = int(it.get("_views") or it.get("views") or it.get("views_count") or 0)
     url = it.get("_link") or it.get("display_url") or it.get("url") or ""
     title = it.get("title") or ""
     text = it.get("text") or it.get("caption") or ""
     body = title if title and title in text else f"{title}\n{text}" if title else text
+
+    meta = esc(dt) if v <= 0 else f"{esc(dt)} | 👀 {v:,}"
     return (
         f"<b>{esc(ch_title)}</b>\n"
-        f"{esc(dt)} | 👀 {v:,}\n"
+        f"{meta}\n"
         f"{esc(body[:400])}\n"
         f"<a href='{esc(url)}'>{esc(url)}</a>"
     )

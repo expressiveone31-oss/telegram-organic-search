@@ -21,25 +21,57 @@ def test_emoji_inside_text_ignored_both_ways():
     assert _contains_seed("Лувр с AliExpress", "копия: ➖Лувр ❤️ с AliExpress уже стоит")
 
 
-def test_public_channel_link_rebuilt_from_username():
-    it = {
-        "url": "https://t.me/joinchat/AYs2WTVN3MY0Yjly/6093",
-        "channel": {"username": "moya_moskva"},
-    }
-    assert _link_of(it) == "https://t.me/moya_moskva/6093"
+# Реальный элемент ответа Telemetr: ни вложенного channel, ни просмотров,
+# ссылка без схемы, id канала в корне.
+REAL_ITEM = {
+    "id": 940,
+    "date": 1788429915,
+    "link": "t.me/volobuev/940",
+    "channel_id": 1105810677,
+    "is_forwarded": 0,
+    "is_deleted": 0,
+    "text": "Нам, конечно, недостаточно такого уровня рождаемости",
+}
+
+
+def test_scheme_added_to_bare_link():
+    assert _link_of(REAL_ITEM) == "https://t.me/volobuev/940"
+
+
+def test_public_channel_link_rebuilt_from_channels_index():
+    it = {"link": "t.me/joinchat/AYs2WTVN3MY0Yjly/6093", "channel_id": 777}
+    channels = {"777": {"id": 777, "username": "moya_moskva"}}
+    assert _link_of(it, channels) == "https://t.me/moya_moskva/6093"
 
 
 def test_private_channel_falls_back_to_internal_link():
-    it = {
-        "url": "https://t.me/joinchat/AYs2WTVN3MY0Yjly/6093",
-        "channel": {"id": -1001234567890},
-    }
-    assert _link_of(it) == "https://t.me/c/1234567890/6093"
+    it = {"link": "t.me/joinchat/AYs2WTVN3MY0Yjly/6093", "channel_id": 1105810677}
+    assert _link_of(it) == "https://t.me/c/1105810677/6093"
+
+
+def test_internal_id_strips_minus_100_prefix():
+    it = {"link": "t.me/joinchat/hash/6093", "channel_id": -1001105810677}
+    assert _link_of(it) == "https://t.me/c/1105810677/6093"
 
 
 def test_normal_public_link_left_alone():
-    it = {"url": "https://t.me/moya_moskva/6093", "channel": {"username": "other"}}
+    it = {"link": "https://t.me/moya_moskva/6093", "channel_id": 1}
     assert _link_of(it) == "https://t.me/moya_moskva/6093"
+
+
+def test_card_falls_back_to_username_when_channel_unknown():
+    card = fmt_tg_card({
+        "date": 1788429915,
+        "_link": "https://t.me/volobuev/940",
+        "_username": "volobuev",
+        "text": "текст",
+    })
+    assert "@volobuev" in card
+
+
+def test_card_hides_views_when_api_gives_none():
+    card = fmt_tg_card({"date": 1788429915, "_link": "https://t.me/x/1", "text": "текст"})
+    assert "👀" not in card
 
 
 def test_post_id_recovered_from_joinchat_tail():
