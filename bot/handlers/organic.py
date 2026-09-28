@@ -160,7 +160,7 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
         return
 
     if platform == "tg":
-        total_views = sum(int(r.get("views") or r.get("views_count") or 0) for r in results)
+        total_views = sum(int(r.get("_views") or r.get("views") or r.get("views_count") or 0) for r in results)
         await wait.edit_text(fmt_tg_summary(since_ts, until_ts, len(results), total_views))
         for it in results[:MAX_CARDS]:
             try:

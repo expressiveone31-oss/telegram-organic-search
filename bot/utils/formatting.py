@@ -30,18 +30,35 @@ def fmt_vk_summary(since_ts: int, until_ts: int, total: int, views: int) -> str:
     )
 
 
+def _fmt_date(value: Any) -> str:
+    """Telemetr отдаёт дату unix-числом либо ISO-строкой."""
+    if value in (None, "", 0):
+        return "?"
+    if isinstance(value, (int, float)) or str(value).isdigit():
+        try:
+            return datetime.fromtimestamp(int(value), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError, OverflowError):
+            return "?"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(value)
+
+
 def fmt_tg_card(it: Dict[str, Any]) -> str:
     ch = it.get("channel") or {}
     ch_title = ch.get("title") or ch.get("name") or "Telegram"
-    dt = it.get("date") or it.get("published_at") or ""
-    v = it.get("views") or it.get("views_count") or 0
+    dt = _fmt_date(it.get("date") or it.get("published_at"))
+    # _views считает search_telemetr, он же умеет доставать stats.views
+    v = it.get("_views") or it.get("views") or it.get("views_count") or 0
     url = it.get("_link") or it.get("display_url") or it.get("url") or ""
     title = it.get("title") or ""
     text = it.get("text") or it.get("caption") or ""
     body = title if title and title in text else f"{title}\n{text}" if title else text
     return (
         f"<b>{esc(ch_title)}</b>\n"
-        f"{esc(str(dt))} | 👀 {v}\n"
+        f"{esc(dt)} | 👀 {v:,}\n"
         f"{esc(body[:400])}\n"
         f"<a href='{esc(url)}'>{esc(url)}</a>"
     )

@@ -4,12 +4,13 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -66,8 +67,50 @@ def _views_of(it: Dict[str, Any]) -> int:
         return 0
 
 
+def _post_id_of(it: Dict[str, Any]) -> str:
+    for key in ("post_id", "message_id", "msg_id", "tg_post_id", "id"):
+        v = it.get(key)
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            return str(v)
+    # joinchat-ссылки Telemetr хвостом несут номер поста: .../AYs2WTVN/6093
+    raw = it.get("display_url") or it.get("url") or it.get("link") or ""
+    m = re.search(r"/(\d+)/?$", raw)
+    return m.group(1) if m else ""
+
+
+def _channel_of(it: Dict[str, Any]) -> Dict[str, Any]:
+    ch = it.get("channel")
+    return ch if isinstance(ch, dict) else {}
+
+
 def _link_of(it: Dict[str, Any]) -> str:
-    return it.get("display_url") or it.get("url") or it.get("link") or ""
+    """
+    Ссылка на пост. Приватные каналы Telemetr отдаёт как t.me/joinchat/<hash>/<id> —
+    это не открывается, инвайт-хэш к тому же протухает. Собираем ссылку сами.
+    """
+    raw = (it.get("display_url") or it.get("url") or it.get("link") or "").strip()
+    if raw and "/joinchat/" not in raw and "/+" not in raw:
+        return raw
+
+    ch = _channel_of(it)
+    post_id = _post_id_of(it)
+    if not post_id:
+        return raw
+
+    username = ch.get("username") or ch.get("link") or it.get("username") or ""
+    username = str(username).lstrip("@").replace("https://t.me/", "").strip("/")
+    if username and username.isascii() and "/" not in username:
+        return f"https://t.me/{username}/{post_id}"
+
+    # приватный канал без юзернейма — внутренняя ссылка t.me/c/<id>/<post>
+    for key in ("tg_id", "telegram_id", "id"):
+        cid = ch.get(key)
+        if isinstance(cid, (int, str)) and str(cid).lstrip("-").isdigit():
+            short = str(cid).lstrip("-")
+            short = short[3:] if short.startswith("100") else short
+            if short:
+                return f"https://t.me/c/{short}/{post_id}"
+    return raw
 
 
 # Telemetr не гарантирует имя поля с текстом поста, поэтому собираем из всех известных
@@ -92,12 +135,26 @@ def _body_of(it: Dict[str, Any]) -> str:
 
 _QUOTES_RE = re.compile(r"[«»„“”\"'`]")
 _SPACES_RE = re.compile(r"\s+")
+# Невидимые склейки эмодзи: селектор вариации и zero-width joiner
+_INVISIBLE = {"\ufe0f", "\ufe0e", "\u200d"}
+
+
+def _strip_emoji(s: str) -> str:
+    """
+    Убирает эмодзи и пиктограммы. Репост часто отличается от посева только
+    ведущим значком (⚡, ✅, ➖), и без этого дословное совпадение не находится.
+    """
+    return "".join(
+        ch for ch in s
+        if ch not in _INVISIBLE and unicodedata.category(ch) != "So"
+    )
 
 
 def _normalize(s: str) -> str:
-    """Нормализует текст для сравнения: нижний регистр, убирает кавычки и лишние пробелы."""
+    """Нормализует текст для сравнения: регистр, кавычки, эмодзи, ё и пробелы."""
     s = unicodedata.normalize("NFKC", s or "").lower()
     s = _QUOTES_RE.sub("", s)
+    s = _strip_emoji(s)
     s = s.replace("ё", "е")
     return _SPACES_RE.sub(" ", s).strip()
 
@@ -162,8 +219,11 @@ async def search_telemetr(
         return [], "нет фраз для поиска"
 
     matched: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    raw_sample: Optional[Dict[str, Any]] = None
     skipped_no_body = 0
     skipped_no_match = 0
+    skipped_dupes = 0
 
     async with httpx.AsyncClient() as client:
         for raw_seed in seeds:
@@ -176,20 +236,22 @@ async def search_telemetr(
                 logger.info("Telemetr seed=%r: %d items from cache", raw_seed, len(items_all))
             else:
                 items_all = []
+                barren = 0
                 for page in range(1, cfg["pages"] + 1):
                     items = await _fetch_page(client, cfg["token"], q, since, until, page)
                     if not items:
                         break
                     items_all.extend(items)
 
-                    # Страница без единого дословного совпадения — дальше только шум,
-                    # который всё равно отсеется. Не тратим на него запросы.
+                    # Выдача Telemetr не строго отсортирована по релевантности, поэтому
+                    # останавливаемся только после двух пустых страниц подряд.
                     page_hits = sum(
                         1 for it in items
                         if isinstance(it, dict) and _contains_seed(raw_seed, _body_of(it))
                     )
-                    if page_hits == 0:
-                        logger.info("Telemetr seed=%r: stop at page %d, no exact hits", raw_seed, page)
+                    barren = barren + 1 if page_hits == 0 else 0
+                    if barren >= 2:
+                        logger.info("Telemetr seed=%r: stop at page %d, 2 barren pages", raw_seed, page)
                         break
                     if len(items) < 50:
                         break
@@ -205,6 +267,8 @@ async def search_telemetr(
                             list(first.keys()) if isinstance(first, dict) else type(first),
                             _views_of(first) if isinstance(first, dict) else "?",
                             _link_of(first) if isinstance(first, dict) else "?")
+                if raw_sample is None and isinstance(first, dict):
+                    raw_sample = first
             else:
                 logger.info("Telemetr seed=%r: zero items from API", raw_seed)
 
@@ -225,8 +289,17 @@ async def search_telemetr(
                 if not _contains_seed(raw_seed, body):
                     skipped_no_match += 1
                     continue
+
+                link = _link_of(it)
+                dedup_key = link or f"{_channel_of(it).get('id')}_{_post_id_of(it)}"
+                if dedup_key in seen:
+                    skipped_dupes += 1
+                    continue
+                seen.add(dedup_key)
+
                 it["_seed"] = raw_seed
-                it["_link"] = _link_of(it)
+                it["_link"] = link
+                it["_views"] = v
                 matched.append(it)
 
             if skipped_views:
@@ -235,7 +308,14 @@ async def search_telemetr(
     diag = (
         f"seeds={len(seeds)}, matched={len(matched)}, "
         f"no_match={skipped_no_match}, no_body={skipped_no_body}, "
-        f"range={since}–{until}, {cache.stats()}"
+        f"dupes={skipped_dupes}, range={since}–{until}, {cache.stats()}"
     )
     logger.info("Telemetr done: %s", diag)
+
+    # Схема ответа Telemetr не документирована — под отладкой показываем сырой
+    # элемент, чтобы видеть, откуда на самом деле брать ссылку и просмотры.
+    if os.getenv("ORGANIC_DEBUG", "0") == "1" and raw_sample is not None:
+        sample = json.dumps(raw_sample, ensure_ascii=False, default=str)
+        diag += f"\n\nСырой ответ: {sample[:1500]}"
+
     return matched, diag

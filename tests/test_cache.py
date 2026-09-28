@@ -33,8 +33,11 @@ def _stub_pages(monkeypatch, pages):
     return requested
 
 
-def _full_page(text):
-    return [{"text": text, "stats": {"views": 1000}, "url": f"u{i}"} for i in range(50)]
+def _full_page(text, page=1):
+    return [
+        {"text": text, "stats": {"views": 1000}, "url": f"https://t.me/ch/{page}{i:03d}"}
+        for i in range(50)
+    ]
 
 
 def test_second_identical_search_makes_no_requests(monkeypatch):
@@ -49,14 +52,27 @@ def test_second_identical_search_makes_no_requests(monkeypatch):
     assert len(second) == len(first)
 
 
-def test_pagination_stops_when_page_has_no_exact_hits(monkeypatch):
-    # первая страница — сплошной шум, дальше листать незачем
-    requested = _stub_pages(monkeypatch, {p: _full_page(NOISE) for p in range(1, 6)})
+def test_pagination_stops_after_two_barren_pages(monkeypatch):
+    requested = _stub_pages(monkeypatch, {p: _full_page(NOISE, p) for p in range(1, 6)})
 
     results, _ = asyncio.run(telemetr_search.search_telemetr([SEED], 0, 86400))
 
     assert results == []
-    assert requested == [1], f"должна запрашиваться только 1 страница, а не {requested}"
+    assert requested == [1, 2], f"ожидались 2 страницы, а не {requested}"
+
+
+def test_single_barren_page_does_not_stop_paging(monkeypatch):
+    # шум на 2-й странице не должен обрывать обход: на 3-й ещё есть органика
+    requested = _stub_pages(monkeypatch, {
+        1: _full_page(ORGANIC, 1),
+        2: _full_page(NOISE, 2),
+        3: _full_page(ORGANIC, 3),
+    })
+
+    results, _ = asyncio.run(telemetr_search.search_telemetr([SEED], 0, 86400))
+
+    assert 3 in requested, f"3-я страница должна запрашиваться, запрошены {requested}"
+    assert results
 
 
 def test_cache_disabled_by_zero_ttl(monkeypatch):
