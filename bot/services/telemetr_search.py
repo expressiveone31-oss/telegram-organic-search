@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from bot.services import cache
+from bot.utils.text import contains_phrase, normalize_for_match
 
 logger = logging.getLogger(__name__)
 
@@ -150,35 +151,12 @@ def _body_of(it: Dict[str, Any]) -> str:
     return " ".join(parts).strip()
 
 
-_QUOTES_RE = re.compile(r"[«»„“”\"'`]")
-_SPACES_RE = re.compile(r"\s+")
-# Невидимые склейки эмодзи: селектор вариации и zero-width joiner
-_INVISIBLE = {"\ufe0f", "\ufe0e", "\u200d"}
-
-
-def _strip_emoji(s: str) -> str:
-    """
-    Убирает эмодзи и пиктограммы. Репост часто отличается от посева только
-    ведущим значком (⚡, ✅, ➖), и без этого дословное совпадение не находится.
-    """
-    return "".join(
-        ch for ch in s
-        if ch not in _INVISIBLE and unicodedata.category(ch) != "So"
-    )
-
-
-def _normalize(s: str) -> str:
-    """Нормализует текст для сравнения: регистр, кавычки, эмодзи, ё и пробелы."""
-    s = unicodedata.normalize("NFKC", s or "").lower()
-    s = _QUOTES_RE.sub("", s)
-    s = _strip_emoji(s)
-    s = s.replace("ё", "е")
-    return _SPACES_RE.sub(" ", s).strip()
+_normalize = normalize_for_match
 
 
 def _contains_seed(seed: str, body: str) -> bool:
     """Проверяет что тело поста содержит фразу посева (нормализованно)."""
-    return _normalize(seed) in _normalize(body)
+    return contains_phrase(seed, body)
 
 
 async def _fetch_page(

@@ -3,15 +3,15 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
-import re
-import unicodedata
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 from bot.services import cache
+from bot.utils.text import contains_phrase
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +22,29 @@ def _cfg() -> Dict[str, Any]:
     return {
         "token":     os.getenv("VK_TOKEN", "").strip(),
         "max_pages": int(os.getenv("VK_MAX_PAGES", "5") or 5),
-        "min_views": int(os.getenv("VK_MIN_VIEWS", "500") or 500),
+        # ВК отдаёт views далеко не у каждого поста: у записей из личных
+        # профилей счётчика нет вовсе. Ненулевой порог отсеивает их все.
+        "min_views": int(os.getenv("VK_MIN_VIEWS", "0") or 0),
         "strict":    os.getenv("VK_STRICT", "1") == "1",
     }
 
 
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKC", (s or "").lower())
-    s = s.replace("ё", "е")
-    return re.sub(r"\s+", " ", s).strip()
+_contains = contains_phrase
+
+# newsfeed.search доступен только по пользовательскому токену
+_TOKEN_ERRORS = {5, 15, 27, 28}
 
 
-def _contains(needle: str, hay: str) -> bool:
-    return _norm(needle) in _norm(hay)
+class VkApiError(RuntimeError):
+    def __init__(self, code: int, msg: str):
+        self.code = code
+        hint = ""
+        if code in _TOKEN_ERRORS:
+            hint = (
+                "\n\nМетод newsfeed.search работает только с пользовательским "
+                "токеном ВК. Сервисный токен и токен сообщества его не открывают."
+            )
+        super().__init__(f"VK API error {code}: {msg}{hint}")
 
 
 async def _call(
@@ -51,7 +61,8 @@ async def _call(
     r.raise_for_status()
     data = r.json()
     if "error" in data:
-        raise RuntimeError(f"VK API error {data['error'].get('error_code')}: {data['error'].get('error_msg')}")
+        err = data["error"]
+        raise VkApiError(int(err.get("error_code") or 0), str(err.get("error_msg") or ""))
     return data["response"]
 
 
@@ -66,6 +77,11 @@ async def search_vk(
 
     results: List[Dict[str, Any]] = []
     diag_parts = []
+    seen: set[str] = set()
+    raw_sample: Optional[Dict[str, Any]] = None
+    last_error: Optional[Exception] = None
+    skipped_views = 0
+    skipped_dupes = 0
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
@@ -93,6 +109,7 @@ async def search_vk(
                         resp = await _call(client, cfg["token"], "newsfeed.search", params)
                     except Exception as e:
                         logger.error("VK search error seed=%r: %s", seed, e)
+                        last_error = e
                         break
 
                     items = resp.get("items", [])
@@ -110,23 +127,32 @@ async def search_vk(
 
                 cache.set(ckey, items_all)
 
+            if items_all and raw_sample is None:
+                raw_sample = items_all[0]
+
             matched = 0
             for it in items_all:
                 views = (it.get("views") or {}).get("count", 0)
                 if views < cfg["min_views"]:
+                    skipped_views += 1
                     continue
                 text = it.get("text") or ""
                 if not text:
                     continue
                 if cfg["strict"] and not _contains(seed, text):
                     continue
+
+                url = f"https://vk.com/wall{it.get('owner_id')}_{it.get('id')}"
+                if url in seen:
+                    skipped_dupes += 1
+                    continue
+                seen.add(url)
+
                 matched += 1
-                owner_id = it.get("owner_id")
-                post_id = it.get("id")
                 results.append({
                     "date":    it.get("date", 0),
                     "views":   views,
-                    "url":     f"https://vk.com/wall{owner_id}_{post_id}",
+                    "url":     url,
                     "excerpt": text[:200] + ("…" if len(text) > 200 else ""),
                     "_seed":   seed,
                 })
@@ -134,5 +160,16 @@ async def search_vk(
             logger.info("VK seed=%r fetched=%d matched=%d", seed, len(items_all), matched)
             diag_parts.append(f"'{seed}': {matched}/{len(items_all)}")
 
+    # Ошибку API нельзя прятать за «ничего не найдено»: чаще всего это
+    # неподходящий токен, и без текста ошибки это не диагностируется.
+    if not results and last_error is not None:
+        raise last_error
+
     results.sort(key=lambda r: r["date"], reverse=True)
-    return results, "VK: " + "; ".join(diag_parts) + f" | {cache.stats()}"
+    diag = (
+        "VK: " + "; ".join(diag_parts)
+        + f" | low_views={skipped_views}, dupes={skipped_dupes} | {cache.stats()}"
+    )
+    if os.getenv("ORGANIC_DEBUG", "0") == "1" and raw_sample is not None:
+        diag += "\n\nСырой ответ: " + json.dumps(raw_sample, ensure_ascii=False, default=str)[:1500]
+    return results, diag
