@@ -21,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.services.link_parser import parse_link, extract_seeds_from_posts
+from bot.services.link_parser import parse_link, extract_seeds_from_posts, extract_manual_seeds
 from bot.services.telemetr_search import search_telemetr
 from bot.services.vk_search import search_vk
 from bot.utils.formatting import esc, fmt_tg_summary, fmt_vk_summary, fmt_tg_card, fmt_vk_card
@@ -76,13 +76,8 @@ async def handle_input(m: Message, state: FSMContext):
             posts.append(post)
     await parsing_msg.delete()
 
-    # — ручные фразы: строки без ссылок
-    text_no_urls = URL_RE.sub("", text)
-    manual_seeds = [
-        line.strip()
-        for line in text_no_urls.splitlines()
-        if len(line.strip()) >= 4
-    ]
+    # — ручные фразы: то, что осталось от сообщения после вырезания ссылок
+    manual_seeds = extract_manual_seeds(URL_RE.sub("", text))
 
     if not posts and not manual_seeds:
         await m.answer(

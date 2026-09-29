@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -115,32 +116,45 @@ async def parse_link(url: str) -> Optional[ParsedPost]:
     return None
 
 
+_INVISIBLE = {"\ufe0f", "\ufe0e", "\u200d"}
+
+
 def _clean_for_sentences(text: str) -> str:
     """Убирает ссылки и эмодзи, оставляет пунктуацию для разбивки на предложения."""
     text = re.sub(r"https?://\S+", "", text)
-    # эмодзи (основные блоки Unicode)
-    text = re.sub(r"[\U0001F300-\U0001FFFF]", "", text)
+    # Категория So покрывает и ⚡ (U+26A1), и 🔮 — диапазона с U+1F300 мало
+    text = "".join(
+        ch for ch in text
+        if ch not in _INVISIBLE and unicodedata.category(ch) != "So"
+    )
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def extract_seeds_from_posts(texts: list[str]) -> list[str]:
-    """
-    Извлекает поисковые фразы из текстов посевов.
+QUESTION_STARTS = {"ваши", "что", "как", "где", "кто", "зачем", "почему",
+                   "только", "ваш", "напишите", "расскажите"}
 
-    Органика — это чаще всего дословный копипаст посева.
-    Поэтому берём целые предложения из текста как есть, без разбивки на слова.
+
+def extract_seeds_from_posts(
+    texts: list[str],
+    *,
+    min_len: int = 20,
+    limit: int = 8,
+) -> list[str]:
+    """
+    Извлекает поисковые фразы из текстов.
+
+    Органика — это чаще всего дословный копипаст посева, поэтому берём целые
+    предложения как есть. Склейка из нескольких предложений почти никогда не
+    совпадает дословно: достаточно убранной запятой, и совпадения уже нет.
 
     Фильтры:
-    - минимум 20 символов (отсекает "Только смешные ответы", "Что там?")
+    - не короче min_len символов (для посевов 20: отсекает "Что там?")
     - максимум 120 символов (слишком длинное плохо ищется)
-    - не начинается с вопросительного или восклицательного слова
+    - не начинается с вопросительного слова или призыва
     """
     if not texts:
         return []
-
-    QUESTION_STARTS = {"ваши", "что", "как", "где", "кто", "зачем", "почему",
-                       "только", "ваш", "напишите", "расскажите"}
 
     seen: set[str] = set()
     result: list[str] = []
@@ -151,7 +165,7 @@ def extract_seeds_from_posts(texts: list[str]) -> list[str]:
         sentences = re.split(r"[.!?\n]+", clean)
         for s in sentences:
             s = s.strip().strip(",")
-            if len(s) < 20 or len(s) > 120:
+            if len(s) < min_len or len(s) > 120:
                 continue
             # отсекаем вопросы и призывы
             first_word = s.split()[0].lower().rstrip("?!,.")
@@ -161,4 +175,13 @@ def extract_seeds_from_posts(texts: list[str]) -> list[str]:
                 seen.add(s)
                 result.append(s)
 
-    return result[:8]
+    return result[:limit]
+
+
+def extract_manual_seeds(text: str) -> list[str]:
+    """
+    Фразы, набранные руками. Режем так же на предложения — пользователь обычно
+    вставляет кусок текста поста, а не выверенную фразу. Порог длины ниже:
+    короткая фраза здесь осмысленная, её напечатали намеренно.
+    """
+    return extract_seeds_from_posts([text], min_len=10)
