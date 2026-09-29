@@ -66,6 +66,44 @@ def test_same_post_matched_by_two_seeds_returned_once(monkeypatch):
     assert len(results) == 1
 
 
+def test_repost_text_read_from_copy_history(monkeypatch):
+    # у репоста собственный text пустой, оригинал лежит в copy_history
+    repost = {"text": "", "date": 1788809518, "owner_id": -2, "id": 7,
+              "copy_history": [{"text": ORGANIC}]}
+    _stub(monkeypatch, {"items": [repost], "next_from": None})
+    results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert len(results) == 1, "репост органики должен находиться"
+
+
+def test_text_read_from_attachment_caption(monkeypatch):
+    post = {"text": "", "date": 1788809518, "owner_id": -3, "id": 8,
+            "attachments": [{"type": "link", "link": {"title": ORGANIC}}]}
+    _stub(monkeypatch, {"items": [post], "next_from": None})
+    results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert len(results) == 1
+
+
+def test_diagnostics_separate_no_text_from_no_match(monkeypatch):
+    posts = [
+        {"text": "", "date": 1, "owner_id": -4, "id": 9},
+        {"text": "совсем другая новость", "date": 1, "owner_id": -4, "id": 10},
+    ]
+    _stub(monkeypatch, {"items": posts, "next_from": None})
+    _, diag = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert "no_text=1" in diag
+    assert "no_match=1" in diag
+
+
+def test_debug_sample_drops_attachment_noise(monkeypatch):
+    monkeypatch.setenv("ORGANIC_DEBUG", "1")
+    post = {"text": ORGANIC, "date": 1, "owner_id": -5, "id": 11,
+            "attachments": [{"type": "photo", "photo": {"sizes": [{"url": "x" * 3000}]}}]}
+    _stub(monkeypatch, {"items": [post], "next_from": None})
+    _, diag = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert "userapi" not in diag and "xxxx" not in diag
+    assert '"attachments": ["photo"]' in diag
+
+
 def test_noise_is_still_rejected(monkeypatch):
     _stub(monkeypatch, {"items": [_post("НОЧЬ В ДЖУНГЛЯХ в Москва-Сити")], "next_from": None})
     results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))

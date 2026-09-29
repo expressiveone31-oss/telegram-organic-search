@@ -31,6 +31,54 @@ def _cfg() -> Dict[str, Any]:
 
 _contains = contains_phrase
 
+
+def _text_of(it: Dict[str, Any]) -> str:
+    """
+    Весь текст записи. У репоста собственный text пустой, а оригинал лежит в
+    copy_history — а органика во ВКонтакте это чаще всего именно репост.
+    Подписи к вложениям тоже считаются: посев нередко уезжает в подпись к фото.
+    """
+    parts: List[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+    add(it.get("text"))
+
+    for src in it.get("copy_history") or []:
+        if isinstance(src, dict):
+            add(src.get("text"))
+            for att in src.get("attachments") or []:
+                _add_attachment_text(att, add)
+
+    for att in it.get("attachments") or []:
+        _add_attachment_text(att, add)
+
+    return " ".join(parts).strip()
+
+
+def _add_attachment_text(att: Any, add) -> None:
+    if not isinstance(att, dict):
+        return
+    body = att.get(att.get("type") or "")
+    if isinstance(body, dict):
+        for key in ("text", "title", "caption", "description"):
+            add(body.get(key))
+
+
+def _compact(it: Dict[str, Any]) -> Dict[str, Any]:
+    """Вложения раздувают дамп на килобайты ссылок и прячут полезные поля."""
+    out = {k: v for k, v in it.items() if k not in ("attachments", "copy_history")}
+    out["attachments"] = [a.get("type") for a in it.get("attachments") or [] if isinstance(a, dict)]
+    out["copy_history_texts"] = [
+        (src.get("text") or "")[:200]
+        for src in it.get("copy_history") or []
+        if isinstance(src, dict)
+    ]
+    out["_text_of"] = _text_of(it)[:300]
+    return out
+
 # newsfeed.search доступен только по пользовательскому токену
 _TOKEN_ERRORS = {5, 15, 27, 28}
 
@@ -82,6 +130,8 @@ async def search_vk(
     last_error: Optional[Exception] = None
     skipped_views = 0
     skipped_dupes = 0
+    skipped_no_text = 0
+    skipped_no_match = 0
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
@@ -119,7 +169,7 @@ async def search_vk(
                     items_all.extend(items)
 
                     # Страница без дословных совпадений — дальше только шум
-                    if not any(_contains(seed, it.get("text") or "") for it in items):
+                    if not any(_contains(seed, _text_of(it)) for it in items):
                         logger.info("VK seed=%r: stop at page %d, no exact hits", seed, _page + 1)
                         break
                     if not next_from:
@@ -136,10 +186,12 @@ async def search_vk(
                 if views < cfg["min_views"]:
                     skipped_views += 1
                     continue
-                text = it.get("text") or ""
+                text = _text_of(it)
                 if not text:
+                    skipped_no_text += 1
                     continue
                 if cfg["strict"] and not _contains(seed, text):
+                    skipped_no_match += 1
                     continue
 
                 url = f"https://vk.com/wall{it.get('owner_id')}_{it.get('id')}"
@@ -168,8 +220,10 @@ async def search_vk(
     results.sort(key=lambda r: r["date"], reverse=True)
     diag = (
         "VK: " + "; ".join(diag_parts)
-        + f" | low_views={skipped_views}, dupes={skipped_dupes} | {cache.stats()}"
+        + f" | no_text={skipped_no_text}, no_match={skipped_no_match}, "
+        + f"low_views={skipped_views}, dupes={skipped_dupes} | {cache.stats()}"
     )
     if os.getenv("ORGANIC_DEBUG", "0") == "1" and raw_sample is not None:
-        diag += "\n\nСырой ответ: " + json.dumps(raw_sample, ensure_ascii=False, default=str)[:1500]
+        sample = json.dumps(_compact(raw_sample), ensure_ascii=False, default=str)
+        diag += "\n\nСырой ответ: " + sample[:1500]
     return results, diag
