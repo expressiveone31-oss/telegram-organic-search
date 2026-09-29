@@ -108,3 +108,28 @@ def test_noise_is_still_rejected(monkeypatch):
     _stub(monkeypatch, {"items": [_post("НОЧЬ В ДЖУНГЛЯХ в Москва-Сити")], "next_from": None})
     results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
     assert results == []
+
+
+def test_long_seed_becomes_a_short_and_window():
+    # newsfeed.search AND'ит все слова: 8-словная фраза в диагностике давала 0/0
+    qs = vk_search.queries_for_seed(SEED)
+    assert qs[0] != SEED
+    assert len(qs[0].split()) == 5
+    assert SEED in qs
+
+
+def test_falls_back_when_full_phrase_returns_nothing(monkeypatch):
+    async def fake_call(client, token, method, params):
+        q = params["q"]
+        if q == SEED:
+            return {"items": [], "next_from": None}
+        return {"items": [_post(ORGANIC)], "next_from": None}
+
+    monkeypatch.setattr(vk_search, "_call", fake_call)
+    results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert len(results) == 1
+
+
+def test_typographic_quotes_stripped_from_query():
+    qs = vk_search.queries_for_seed("В такую «эчпочмачную» мы бы сходили")
+    assert all("«" not in q and "»" not in q for q in qs)

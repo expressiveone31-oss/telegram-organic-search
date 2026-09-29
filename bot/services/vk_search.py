@@ -31,6 +31,62 @@ def _cfg() -> Dict[str, Any]:
 
 _contains = contains_phrase
 
+# newsfeed.search склеивает слова через AND. Длинное предложение из 8+ слов
+# почти всегда даёт 0 записей — индекс не находит документ, где есть все сразу.
+# В API уходит короткое окно, полное предложение проверяем у себя.
+_QUERY_STOP = {
+    "в", "на", "по", "из", "за", "к", "у", "о", "об", "и", "а", "но", "не",
+    "что", "как", "это", "мы", "вы", "они", "он", "она", "я", "бы", "уже",
+    "еще", "ещё", "там", "тут", "для", "при", "без", "или", "то", "же",
+}
+_QUERY_WINDOW = 5
+
+
+def _clean_query(seed: str) -> str:
+    return " ".join(
+        seed.replace("«", " ").replace("»", " ").replace('"', " ")
+        .replace("“", " ").replace("”", " ").split()
+    )
+
+
+def queries_for_seed(seed: str) -> List[str]:
+    """Запросы к API: короткое характерное окно, затем полная фраза."""
+    clean = _clean_query(seed)
+    if not clean:
+        return []
+    words = clean.split()
+    out: List[str] = []
+    if len(words) > _QUERY_WINDOW:
+        window = _best_window(words, _QUERY_WINDOW)
+        if window:
+            out.append(window)
+        tail = " ".join(words[-_QUERY_WINDOW:])
+        if tail.lower() != (window or "").lower():
+            out.append(tail)
+    out.append(clean)
+    seen: set[str] = set()
+    uniq: List[str] = []
+    for q in out:
+        key = q.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(q)
+    return uniq
+
+
+def _best_window(words: List[str], size: int) -> str:
+    best, best_score = "", -1
+    for i in range(0, len(words) - size + 1):
+        window = words[i : i + size]
+        score = sum(
+            2 if len(w) >= 5 else 1
+            for w in window
+            if w.lower() not in _QUERY_STOP and len(w) >= 4
+        )
+        if score > best_score:
+            best_score, best = score, " ".join(window)
+    return best
+
 
 def _text_of(it: Dict[str, Any]) -> str:
     """
@@ -135,7 +191,7 @@ async def search_vk(
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
-            ckey = cache.make_key("vk", seed, since_ts, until_ts, cfg["max_pages"])
+            ckey = cache.make_key("vk", seed, since_ts, until_ts, cfg["max_pages"], "qwin5")
 
             cached = cache.get(ckey)
             if cached is not None:
@@ -143,37 +199,43 @@ async def search_vk(
                 logger.info("VK seed=%r: %d items from cache", seed, len(items_all))
             else:
                 items_all = []
-                next_from = None
+                seen_posts: set[tuple] = set()
+                for query in queries_for_seed(seed):
+                    next_from = None
+                    barren = 0
+                    for _page in range(cfg["max_pages"]):
+                        params: Dict[str, Any] = {
+                            "q": query,
+                            "count": 50,
+                            "start_time": since_ts,
+                            "end_time": until_ts,
+                        }
+                        if next_from:
+                            params["start_from"] = next_from
 
-                for _page in range(cfg["max_pages"]):
-                    params: Dict[str, Any] = {
-                        "q": seed,
-                        "count": 50,
-                        "start_time": since_ts,
-                        "end_time": until_ts,
-                    }
-                    if next_from:
-                        params["start_from"] = next_from
+                        try:
+                            resp = await _call(client, cfg["token"], "newsfeed.search", params)
+                        except Exception as e:
+                            logger.error("VK search error seed=%r q=%r: %s", seed, query, e)
+                            last_error = e
+                            break
 
-                    try:
-                        resp = await _call(client, cfg["token"], "newsfeed.search", params)
-                    except Exception as e:
-                        logger.error("VK search error seed=%r: %s", seed, e)
-                        last_error = e
-                        break
+                        items = resp.get("items", [])
+                        next_from = resp.get("next_from")
+                        if not items:
+                            break
 
-                    items = resp.get("items", [])
-                    next_from = resp.get("next_from")
-                    if not items:
-                        break
-                    items_all.extend(items)
+                        for it in items:
+                            key = (it.get("owner_id"), it.get("id"))
+                            if key in seen_posts:
+                                continue
+                            seen_posts.add(key)
+                            items_all.append(it)
 
-                    # Страница без дословных совпадений — дальше только шум
-                    if not any(_contains(seed, _text_of(it)) for it in items):
-                        logger.info("VK seed=%r: stop at page %d, no exact hits", seed, _page + 1)
-                        break
-                    if not next_from:
-                        break
+                        page_hits = sum(1 for it in items if _contains(seed, _text_of(it)))
+                        barren = barren + 1 if page_hits == 0 else 0
+                        if barren >= 2 or not next_from:
+                            break
 
                 cache.set(ckey, items_all)
 
