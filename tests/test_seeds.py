@@ -33,5 +33,28 @@ def test_clean_strips_emoji_outside_the_f300_block():
     assert _clean_for_sentences("⚡️Москвичи получили пирамиду 🔮") == "Москвичи получили пирамиду"
 
 
+MULTILINE = (
+    "⚡Москвичи, кажется, получили собственную пирамиду в честь дня города в Сити.\n"
+    "Неожиданно возникшая постройка уже разлетелась на мемы 😂\n"
+    "\n"
+    "Загадочная пирамида в Москва Сити стала героиней мемов.\n"
+    "В такую «эчпочмачную» мы бы сходили"
+)
+
+
+def test_newline_separates_sentences_without_terminal_punctuation():
+    seeds = extract_manual_seeds(MULTILINE)
+    assert "Неожиданно возникшая постройка уже разлетелась на мемы" in seeds
+    assert "Загадочная пирамида в Москва Сити стала героиней мемов" in seeds
+    # без сохранения переносов эти две строки склеивались в одну фразу
+    assert not any(
+        "мемы Загадочная" in s for s in seeds
+    ), "строки без точки на конце не должны склеиваться"
+
+
+def test_blank_lines_do_not_produce_empty_seeds():
+    assert all(s.strip() for s in extract_manual_seeds(MULTILINE))
+
+
 def test_urls_removed_before_splitting():
     assert "t.me" not in " ".join(extract_manual_seeds("Пирамида в Сити https://t.me/x/1 стала мемом"))

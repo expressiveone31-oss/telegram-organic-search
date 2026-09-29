@@ -127,7 +127,10 @@ def _clean_for_sentences(text: str) -> str:
         ch for ch in text
         if ch not in _INVISIBLE and unicodedata.category(ch) != "So"
     )
-    text = re.sub(r"\s+", " ", text)
+    # Переносы строк — такой же разделитель предложений, как точка, поэтому
+    # схлопываем только пробелы внутри строки, а сами переносы сохраняем.
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r"\n\s*", "\n", text)
     return text.strip()
 
 
