@@ -16,9 +16,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 TG_URL_RE       = re.compile(r"https?://t\.me/(?:s/)?([A-Za-z0-9_]+)/(\d+)")
-VK_URL_RE       = re.compile(r"https?://vk\.(?:com|ru)/wall(-?\d+)_(\d+)")
-VK_SHORT_URL_RE = re.compile(r"https?://vk\.(?:com|ru)/[^?#]+\?w=wall(-?\d+)_(\d+)")
-VK_CLUB_RE      = re.compile(r"https?://vk\.(?:com|ru)/(?:club|public|event)(\d+)")
+# схема и m. необязательны: пользователь часто шлёт vk.ru/wall-… без https
+_VK_HOST = r"(?:https?://)?(?:m\.)?vk\.(?:com|ru)/"
+VK_URL_RE       = re.compile(_VK_HOST + r"wall(-?\d+)_(\d+)")
+VK_SHORT_URL_RE = re.compile(_VK_HOST + r"[^?\s#]+[?&]w=wall(-?\d+)_(\d+)")
+VK_CLUB_RE      = re.compile(_VK_HOST + r"(?:club|public|event)(\d+)")
 
 @dataclass
 class ParsedPost:

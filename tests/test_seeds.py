@@ -64,3 +64,9 @@ def test_vk_owners_from_wall_and_club_links():
     from bot.services.link_parser import extract_vk_owner_ids
     text = "https://vk.ru/wall-47636806_151669 и https://vk.com/club123"
     assert extract_vk_owner_ids(text) == [-47636806, -123]
+
+
+def test_vk_owners_without_https():
+    from bot.services.link_parser import extract_vk_owner_ids
+    assert extract_vk_owner_ids("vk.ru/wall-47636806_151669") == [-47636806]
+    assert extract_vk_owner_ids("m.vk.com/club47636806") == [-47636806]

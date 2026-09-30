@@ -26,7 +26,18 @@ def _cfg() -> Dict[str, Any]:
         # профилей счётчика нет вовсе. Ненулевой порог отсеивает их все.
         "min_views": int(os.getenv("VK_MIN_VIEWS", "0") or 0),
         "strict":    os.getenv("VK_STRICT", "1") == "1",
+        # список стен через запятую, если глобальный поиск их не видит
+        "owners":    _parse_owner_list(os.getenv("VK_WALL_OWNERS", "")),
     }
+
+
+def _parse_owner_list(raw: str) -> List[int]:
+    out: List[int] = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            out.append(int(part))
+    return out
 
 
 _contains = contains_phrase
@@ -206,6 +217,7 @@ async def search_vk(
     cfg = _cfg()
     if not cfg["token"]:
         raise RuntimeError("VK_TOKEN is not set")
+    owners = list(dict.fromkeys(list(owners or []) + cfg["owners"]))
 
     results: List[Dict[str, Any]] = []
     diag_parts = []

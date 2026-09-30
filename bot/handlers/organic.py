@@ -36,12 +36,23 @@ ORGANIC_WINDOW_DAYS = int(os.getenv("ORGANIC_WINDOW_DAYS", "14"))
 ORGANIC_DEBUG       = os.getenv("ORGANIC_DEBUG", "0") == "1"
 MAX_CARDS           = int(os.getenv("ORGANIC_MAX_CARDS", "15"))
 
-URL_RE = re.compile(r"https?://\S+")
+URL_RE = re.compile(r"https?://\S+|(?:https?://)?(?:m\.)?vk\.(?:com|ru)/\S+")
 
 
 class OrganicFlow(StatesGroup):
     waiting_input    = State()
     waiting_platform = State()
+
+
+def _owners_line(vk_owners: list[int]) -> str:
+    if not vk_owners:
+        return ""
+    links = []
+    for oid in vk_owners:
+        links.append(
+            f"https://vk.com/club{abs(oid)}" if oid < 0 else f"https://vk.com/id{oid}"
+        )
+    return "<b>Паблики ВК:</b> " + ", ".join(links) + "\n"
 
 
 def _platform_kb() -> InlineKeyboardMarkup:
@@ -71,6 +82,24 @@ async def cmd_start(m: Message, state: FSMContext):
 @router.message(StateFilter(None, OrganicFlow.waiting_input, OrganicFlow.waiting_platform), F.text)
 async def handle_input(m: Message, state: FSMContext):
     text = m.text or ""
+    data = await state.get_data()
+    prev_seeds: list[str] = data.get("seeds") or []
+    extra_owners = extract_vk_owner_ids(text)
+    leftover = extract_manual_seeds(URL_RE.sub("", text))
+
+    # Ссылка на паблик после пустого VK-поиска: не начинаем новый запрос,
+    # а добавляем стену к уже извлечённым фразам.
+    if prev_seeds and extra_owners and not leftover:
+        owners = list(dict.fromkeys((data.get("vk_owners") or []) + extra_owners))
+        await state.update_data(vk_owners=owners)
+        await state.set_state(OrganicFlow.waiting_platform)
+        await m.answer(
+            f"Добавила паблик, фразы те же ({len(prev_seeds)}).\n"
+            f"{_owners_line(owners)}\n"
+            "Где искать?",
+            reply_markup=_platform_kb(),
+        )
+        return
 
     urls = URL_RE.findall(text)
 
@@ -123,17 +152,9 @@ async def handle_input(m: Message, state: FSMContext):
     )
 
     seeds_preview = fmt_seeds_preview(seeds)
-    owners_line = ""
-    if vk_owners:
-        links = []
-        for oid in vk_owners:
-            links.append(
-                f"https://vk.com/club{abs(oid)}" if oid < 0 else f"https://vk.com/id{oid}"
-            )
-        owners_line = "<b>Паблики ВК:</b> " + ", ".join(links) + "\n"
     await m.answer(
         f"<b>Посты:</b> {len(posts)} · <b>Диапазон:</b> {since_str} — {until_str}\n"
-        f"{owners_line}\n"
+        f"{_owners_line(vk_owners)}\n"
         f"<b>Фразы для поиска ({len(seeds)}):</b>\n{seeds_preview}\n\n"
         "Где искать?",
         reply_markup=_platform_kb(),
