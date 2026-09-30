@@ -103,7 +103,7 @@ async def handle_input(m: Message, state: FSMContext):
     # — временной диапазон
     timestamps = [p.timestamp for p in posts if p.timestamp > 0]
     since_ts = min(timestamps) if timestamps else int(time.time()) - ORGANIC_WINDOW_DAYS * 86400
-    until_ts = since_ts + ORGANIC_WINDOW_DAYS * 86400
+    until_ts = max(since_ts + ORGANIC_WINDOW_DAYS * 86400, int(time.time()))
     since_str = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d")
     until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
@@ -146,7 +146,7 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
 
     if not since_ts or not until_ts:
         since_ts = int(time.time()) - ORGANIC_WINDOW_DAYS * 86400
-        until_ts = since_ts + ORGANIC_WINDOW_DAYS * 86400
+        until_ts = max(since_ts + ORGANIC_WINDOW_DAYS * 86400, int(time.time()))
 
     label = "Telegram" if platform == "tg" else "ВКонтакте"
     wait = await cb.message.edit_text(f"Ищу в {label}… может занять 1–2 минуты.")

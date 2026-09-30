@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from bot.services import cache
-from bot.utils.text import contains_phrase
+from bot.utils.text import contains_phrase, phrase_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,7 @@ async def search_vk(
     skipped_dupes = 0
     skipped_no_text = 0
     skipped_no_match = 0
+    closest: List[str] = []
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
@@ -243,6 +244,7 @@ async def search_vk(
                 raw_sample = items_all[0]
 
             matched = 0
+            best_miss: Optional[tuple[float, str]] = None
             for it in items_all:
                 views = (it.get("views") or {}).get("count", 0)
                 if views < cfg["min_views"]:
@@ -254,6 +256,9 @@ async def search_vk(
                     continue
                 if cfg["strict"] and not _contains(seed, text):
                     skipped_no_match += 1
+                    score = phrase_overlap(seed, text)
+                    if best_miss is None or score > best_miss[0]:
+                        best_miss = (score, text[:180].replace("\n", " "))
                     continue
 
                 url = f"https://vk.com/wall{it.get('owner_id')}_{it.get('id')}"
@@ -273,6 +278,8 @@ async def search_vk(
 
             logger.info("VK seed=%r fetched=%d matched=%d", seed, len(items_all), matched)
             diag_parts.append(f"'{seed}': {matched}/{len(items_all)}")
+            if best_miss and matched == 0:
+                closest.append(f"{best_miss[0]:.0%} {best_miss[1]}")
 
     # Ошибку API нельзя прятать за «ничего не найдено»: чаще всего это
     # неподходящий токен, и без текста ошибки это не диагностируется.
@@ -285,6 +292,8 @@ async def search_vk(
         + f" | no_text={skipped_no_text}, no_match={skipped_no_match}, "
         + f"low_views={skipped_views}, dupes={skipped_dupes} | {cache.stats()}"
     )
+    if closest:
+        diag += "\n\nБлижайшие промахи:\n" + "\n".join(f"• {c}" for c in closest[:8])
     if os.getenv("ORGANIC_DEBUG", "0") == "1" and raw_sample is not None:
         sample = json.dumps(_compact(raw_sample), ensure_ascii=False, default=str)
         diag += "\n\nСырой ответ: " + sample[:1500]

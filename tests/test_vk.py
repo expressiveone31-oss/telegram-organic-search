@@ -104,6 +104,20 @@ def test_debug_sample_drops_attachment_noise(monkeypatch):
     assert '"attachments": ["photo"]' in diag
 
 
+def test_hyphenated_city_name_matches_seed_with_space(monkeypatch):
+    seed = "Стеклянная пирамида выросла посреди Москва Сити"
+    post = _post("Стеклянная пирамида выросла посреди Москва-Сити. Горожане шутят.")
+    _stub(monkeypatch, {"items": [post], "next_from": None})
+    results, _ = asyncio.run(vk_search.search_vk([seed], 0, 99999999999))
+    assert len(results) == 1
+
+
+def test_closest_miss_shown_when_nothing_matched(monkeypatch):
+    _stub(monkeypatch, {"items": [_post("Прогулка к величественной пирамиде в Москва-Сити")], "next_from": None})
+    _, diag = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))
+    assert "Ближайшие промахи" in diag
+
+
 def test_noise_is_still_rejected(monkeypatch):
     _stub(monkeypatch, {"items": [_post("НОЧЬ В ДЖУНГЛЯХ в Москва-Сити")], "next_from": None})
     results, _ = asyncio.run(vk_search.search_vk([SEED], 0, 99999999999))

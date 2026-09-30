@@ -32,6 +32,18 @@ def test_quoted_seed_matches_unquoted_body():
     assert _contains_seed('"Москва-Сити"', "живу в Москва-Сити давно")
 
 
+def test_hyphen_in_city_name_still_matches():
+    seed = "Стеклянная пирамида выросла посреди Москва Сити"
+    post = "Стеклянная пирамида выросла посреди Москва-Сити. Горожане шутят."
+    assert _contains_seed(seed, post)
+
+
+def test_emdash_and_newlines_still_match():
+    seed = "Таинственная пирамида выросла посреди Москва Сити"
+    post = "Таинственная пирамида\nвыросла посреди Москва — Сити"
+    assert _contains_seed(seed, post)
+
+
 def test_body_read_from_any_known_key():
     for key in ("text", "title", "caption", "post_text", "message"):
         assert _body_of({key: ORGANIC}) == ORGANIC
