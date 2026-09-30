@@ -147,3 +147,22 @@ def test_falls_back_when_full_phrase_returns_nothing(monkeypatch):
 def test_typographic_quotes_stripped_from_query():
     qs = vk_search.queries_for_seed("В такую «эчпочмачную» мы бы сходили")
     assert all("«" not in q and "»" not in q for q in qs)
+
+
+def test_wall_search_finds_post_newsfeed_misses(monkeypatch):
+    methods = []
+
+    async def fake_call(client, token, method, params):
+        methods.append(method)
+        if method == "wall.search":
+            return {"items": [_post(ORGANIC, owner=-47636806, pid=151669)]}
+        return {"items": [], "next_from": None}
+
+    monkeypatch.setattr(vk_search, "_call", fake_call)
+    results, diag = asyncio.run(
+        vk_search.search_vk([SEED], 0, 99999999999, owners=[-47636806])
+    )
+    assert "wall.search" in methods
+    assert len(results) == 1
+    assert "walls=1" in diag
+    assert "151669" in results[0]["url"]

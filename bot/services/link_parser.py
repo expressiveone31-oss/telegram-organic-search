@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 TG_URL_RE       = re.compile(r"https?://t\.me/(?:s/)?([A-Za-z0-9_]+)/(\d+)")
 VK_URL_RE       = re.compile(r"https?://vk\.(?:com|ru)/wall(-?\d+)_(\d+)")
 VK_SHORT_URL_RE = re.compile(r"https?://vk\.(?:com|ru)/[^?#]+\?w=wall(-?\d+)_(\d+)")
+VK_CLUB_RE      = re.compile(r"https?://vk\.(?:com|ru)/(?:club|public|event)(\d+)")
 
 @dataclass
 class ParsedPost:
@@ -188,3 +189,25 @@ def extract_manual_seeds(text: str) -> list[str]:
     короткая фраза здесь осмысленная, её напечатали намеренно.
     """
     return extract_seeds_from_posts([text], min_len=10)
+
+
+def extract_vk_owner_ids(text: str) -> list[int]:
+    """
+    id стен ВК из ссылок. newsfeed.search не индексирует все паблики;
+    по этим стенам потом ищем через wall.search.
+    club/public/event → отрицательный owner_id сообщества.
+    """
+    ids: list[int] = []
+    for m in VK_URL_RE.finditer(text or ""):
+        ids.append(int(m.group(1)))
+    for m in VK_SHORT_URL_RE.finditer(text or ""):
+        ids.append(int(m.group(1)))
+    for m in VK_CLUB_RE.finditer(text or ""):
+        ids.append(-int(m.group(1)))
+    seen: set[int] = set()
+    out: list[int] = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out

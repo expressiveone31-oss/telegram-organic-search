@@ -58,3 +58,9 @@ def test_blank_lines_do_not_produce_empty_seeds():
 
 def test_urls_removed_before_splitting():
     assert "t.me" not in " ".join(extract_manual_seeds("Пирамида в Сити https://t.me/x/1 стала мемом"))
+
+
+def test_vk_owners_from_wall_and_club_links():
+    from bot.services.link_parser import extract_vk_owner_ids
+    text = "https://vk.ru/wall-47636806_151669 и https://vk.com/club123"
+    assert extract_vk_owner_ids(text) == [-47636806, -123]

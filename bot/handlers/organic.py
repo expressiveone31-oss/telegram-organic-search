@@ -21,7 +21,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.services.link_parser import parse_link, extract_seeds_from_posts, extract_manual_seeds
+from bot.services.link_parser import (
+    parse_link, extract_seeds_from_posts, extract_manual_seeds, extract_vk_owner_ids,
+)
 from bot.services.telemetr_search import search_telemetr
 from bot.services.vk_search import search_vk
 from bot.utils.formatting import esc, fmt_tg_summary, fmt_vk_summary, fmt_tg_card, fmt_vk_card
@@ -56,6 +58,8 @@ async def cmd_start(m: Message, state: FSMContext):
     await m.answer(
         "Привет! Ищу органику по посевам.\n\n"
         "Пришли ссылки на посевные посты — t.me/... или vk.com/wall...\n"
+        "Для поиска во ВК можно сразу добавить ссылки на паблики "
+        "(vk.com/club…): глобальный поиск видит не все стены.\n"
         "Можно сразу несколько в одном сообщении.\n\n"
         "Фразы для поиска извлеку из текстов постов автоматически. "
         "Или добавь свои — по одной строке после ссылок."
@@ -107,12 +111,29 @@ async def handle_input(m: Message, state: FSMContext):
     since_str = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d")
     until_str = datetime.fromtimestamp(until_ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
+    vk_owners = extract_vk_owner_ids(text)
+    for p in posts:
+        if p.platform == "vk":
+            vk_owners.extend(extract_vk_owner_ids(p.url))
+    vk_owners = list(dict.fromkeys(vk_owners))
+
     await state.set_state(OrganicFlow.waiting_platform)
-    await state.update_data(seeds=seeds, since_ts=since_ts, until_ts=until_ts)
+    await state.update_data(
+        seeds=seeds, since_ts=since_ts, until_ts=until_ts, vk_owners=vk_owners,
+    )
 
     seeds_preview = fmt_seeds_preview(seeds)
+    owners_line = ""
+    if vk_owners:
+        links = []
+        for oid in vk_owners:
+            links.append(
+                f"https://vk.com/club{abs(oid)}" if oid < 0 else f"https://vk.com/id{oid}"
+            )
+        owners_line = "<b>Паблики ВК:</b> " + ", ".join(links) + "\n"
     await m.answer(
-        f"<b>Посты:</b> {len(posts)} · <b>Диапазон:</b> {since_str} — {until_str}\n\n"
+        f"<b>Посты:</b> {len(posts)} · <b>Диапазон:</b> {since_str} — {until_str}\n"
+        f"{owners_line}\n"
         f"<b>Фразы для поиска ({len(seeds)}):</b>\n{seeds_preview}\n\n"
         "Где искать?",
         reply_markup=_platform_kb(),
@@ -127,10 +148,13 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
     seeds: list[str] = data.get("seeds") or []
     since_ts: int    = data.get("since_ts") or 0
     until_ts: int    = data.get("until_ts") or 0
+    vk_owners: list[int] = data.get("vk_owners") or []
 
     if not seeds:
         seeds, since_ts, until_ts = recover_from_message(cb.message.text or "")
         logger.info("State was empty, recovered %d seeds from message", len(seeds))
+    if not vk_owners:
+        vk_owners = extract_vk_owner_ids(cb.message.text or "")
 
     # Состояние не чистим: фразы остаются, чтобы поиск по второй соцсети
     # не требовал заново присылать ссылки и заново парсить посты.
@@ -155,7 +179,7 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
         if platform == "tg":
             results, diag = await search_telemetr(seeds, since_ts, until_ts)
         else:
-            results, diag = await search_vk(seeds, since_ts, until_ts)
+            results, diag = await search_vk(seeds, since_ts, until_ts, owners=vk_owners)
     except Exception as e:
         logger.error("Search error platform=%s: %s", platform, e, exc_info=True)
         await wait.edit_text(f"Ошибка поиска: <code>{esc(str(e))}</code>")
@@ -165,10 +189,19 @@ async def handle_platform(cb: CallbackQuery, state: FSMContext):
     logger.info("Search done platform=%s results=%d diag=%s", platform, len(results), diag)
 
     if not results:
+        extra = ""
+        if platform == "vk" and not vk_owners:
+            extra = (
+                "\n\nГлобальный поиск ВК не индексирует все паблики — "
+                "дословные посты в них не находятся. Пришли вместе с фразами "
+                "ссылку на паблик (vk.com/club… или vk.com/wall…), "
+                "поищу по его стене."
+            )
         await wait.edit_text(
             f"Ничего не найдено в {label}.\n\n"
             f"Фраз: {len(seeds)}\n"
-            f"Диагностика: <code>{esc(diag)}</code>",
+            f"Диагностика: <code>{esc(diag)}</code>"
+            f"{extra}",
             reply_markup=_platform_kb(),
         )
         await state.set_state(OrganicFlow.waiting_platform)

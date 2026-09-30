@@ -170,10 +170,38 @@ async def _call(
     return data["response"]
 
 
+async def _search_wall(
+    client: httpx.AsyncClient,
+    token: str,
+    owner_id: int,
+    query: str,
+) -> List[Dict[str, Any]]:
+    """Поиск по одной стене. Кавычки в wall.search означают точную фразу."""
+    clean = _clean_query(query)
+    if not clean:
+        return []
+    params = {"owner_id": owner_id, "query": f'"{clean}"', "count": 100}
+    try:
+        resp = await _call(client, token, "wall.search", params)
+    except Exception as e:
+        logger.error("VK wall.search owner=%s q=%r: %s", owner_id, clean, e)
+        try:
+            resp = await _call(
+                client, token, "wall.search",
+                {"owner_id": owner_id, "query": clean, "count": 100},
+            )
+        except Exception:
+            return []
+    if isinstance(resp, list):
+        return [x for x in resp if isinstance(x, dict)]
+    return list(resp.get("items") or [])
+
+
 async def search_vk(
     seeds: List[str],
     since_ts: int,
     until_ts: int,
+    owners: Optional[List[int]] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     cfg = _cfg()
     if not cfg["token"]:
@@ -192,7 +220,10 @@ async def search_vk(
 
     async with httpx.AsyncClient() as client:
         for seed in seeds:
-            ckey = cache.make_key("vk", seed, since_ts, until_ts, cfg["max_pages"], "qwin5")
+            ckey = cache.make_key(
+                "vk", seed, since_ts, until_ts, cfg["max_pages"], "qwin5",
+                ",".join(map(str, owners or ())),
+            )
 
             cached = cache.get(ckey)
             if cached is not None:
@@ -238,6 +269,15 @@ async def search_vk(
                         if barren >= 2 or not next_from:
                             break
 
+                for owner_id in owners or []:
+                    wall_q = (queries_for_seed(seed) or [seed])[0]
+                    for it in await _search_wall(client, cfg["token"], owner_id, wall_q):
+                        key = (it.get("owner_id"), it.get("id"))
+                        if key in seen_posts:
+                            continue
+                        seen_posts.add(key)
+                        items_all.append(it)
+
                 cache.set(ckey, items_all)
 
             if items_all and raw_sample is None:
@@ -251,6 +291,9 @@ async def search_vk(
                     skipped_views += 1
                     continue
                 text = _text_of(it)
+                ts = int(it.get("date") or 0)
+                if ts and (ts < since_ts or ts > until_ts):
+                    continue
                 if not text:
                     skipped_no_text += 1
                     continue
@@ -290,7 +333,7 @@ async def search_vk(
     diag = (
         "VK: " + "; ".join(diag_parts)
         + f" | no_text={skipped_no_text}, no_match={skipped_no_match}, "
-        + f"low_views={skipped_views}, dupes={skipped_dupes} | {cache.stats()}"
+        + f"low_views={skipped_views}, dupes={skipped_dupes}, walls={len(owners or [])} | {cache.stats()}"
     )
     if closest:
         diag += "\n\nБлижайшие промахи:\n" + "\n".join(f"• {c}" for c in closest[:8])
